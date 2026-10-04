@@ -81,11 +81,7 @@ func (p *Plugin) fetchMetadata(ctx context.Context, pr *provider) (*metadata, er
 	if err != nil {
 		return nil, fmt.Errorf("oauth: discovery for %q: %w", pr.cfg.Name, err)
 	}
-	client := p.opts.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
+	resp, err := p.client().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("oauth: discovery for %q: %w", pr.cfg.Name, err)
 	}

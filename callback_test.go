@@ -25,8 +25,21 @@ func (sidPlugin) Name() string                   { return "test/sid" }
 func (sidPlugin) Version() string                { return "0" }
 func (sidPlugin) Shutdown(context.Context) error { return nil }
 func (sidPlugin) Init(_ context.Context, host collage.Host) error {
-	return host.Handle("/sid", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	if err := host.Handle("/sid", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, session.FromContext(r.Context()).ID())
+	})); err != nil {
+		return err
+	}
+	// /kv?k=key answers the session's value; /kv?k=key&v=value sets it first.
+	return host.Handle("/kv", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s, q := session.FromContext(r.Context()), r.URL.Query()
+		if q.Has("v") {
+			if err := s.Set(q.Get("k"), q.Get("v")); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		_, _ = io.WriteString(w, s.Get(q.Get("k")))
 	}))
 }
 
@@ -487,3 +500,43 @@ func TestClaims_Decode(t *testing.T) {
 }
 
 func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+
+// Ruling 5: a sign-in over another user's session starts clean; the same user
+// signing in again keeps the session's data.
+func TestCallback_SignInOverAnotherUser(t *testing.T) {
+	for _, tc := range []struct {
+		name, second string
+		keep         bool
+	}{
+		{"another user", "user-2", false},
+		{"the same user", "user-1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userID := "user-1"
+			a := newCallbackApp(t, "", func(context.Context, Identity) (string, error) { return userID, nil })
+			a.callback("c1", a.login(t, "c1")).WantStatus(http.StatusSeeOther)
+			if got := a.c.Get("/kv?k=" + session.UserKey).Body; got != "user-1" {
+				t.Fatalf("first sign-in: user %q", got)
+			}
+			a.c.Get("/kv?k=cart&v=3").WantStatus(http.StatusOK)
+			sid := a.sid(t)
+
+			userID = tc.second
+			a.callback("c2", a.login(t, "c2")).WantStatus(http.StatusSeeOther)
+			if got := a.c.Get("/kv?k=" + session.UserKey).Body; got != tc.second {
+				t.Errorf("user = %q, want %q", got, tc.second)
+			}
+			cart := a.c.Get("/kv?k=cart").Body
+			if tc.keep && cart != "3" {
+				t.Errorf("the same user's cart = %q, want it kept", cart)
+			}
+			if !tc.keep && cart != "" {
+				t.Errorf("user-2 inherited user-1's cart %q", cart)
+			}
+			if after := a.sid(t); after == sid || after == "" {
+				t.Errorf("session ID %q before, %q after", sid, after)
+			}
+			a.wantSignedIn(t)
+		})
+	}
+}

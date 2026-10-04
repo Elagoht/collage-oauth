@@ -139,11 +139,20 @@ func (p *Plugin) callback(w http.ResponseWriter, r *http.Request, name string, p
 	http.Redirect(w, r, collage.SafeRedirect(pd.Next, p.opts.AfterLogin), http.StatusSeeOther)
 }
 
-// signIn gives the session a new ID, so one planted before the sign-in holds
-// nothing after it, and stores the user under session.UserKey. Task 6 keeps the
-// provider's tokens here. A failed Set changes nothing, so no one is signed in.
+// signIn signs the session in as userID under a new session ID, so an ID planted
+// before the sign-in holds nothing after it. A session that belongs to another
+// user is cleared first, so nothing of theirs carries over; Set then starts it
+// with a fresh ID. The same user signing in again keeps the session's data.
+//
+// If Set fails, userID is never stored. A session that belonged to another user
+// has already been cleared, so it is signed out; one of the same user, or of no
+// one, keeps what it held under its new ID.
 func (p *Plugin) signIn(_ context.Context, sess *session.Session, _, userID string, _ *tokenResponse) error {
-	sess.Regenerate()
+	if prev := sess.Get(session.UserKey); prev != "" && prev != userID {
+		sess.Clear()
+	} else {
+		sess.Regenerate()
+	}
 	// Task 6: with a Store, seal tok and Save it here.
 	return sess.Set(session.UserKey, userID)
 }
@@ -245,8 +254,12 @@ func (p *Plugin) client() *http.Client {
 	if p.opts.HTTPClient != nil {
 		return p.opts.HTTPClient
 	}
-	return http.DefaultClient
+	return defaultHTTPClient
 }
+
+// defaultHTTPClient is used when Options.HTTPClient is nil (Configure sets one,
+// so only a Plugin used without Configure gets here): never without a timeout.
+var defaultHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 // decodeLimited decodes one JSON value from at most maxResponse bytes of body.
 func decodeLimited[T tokenResponse | userinfoWire](body io.Reader, v *T) error {
