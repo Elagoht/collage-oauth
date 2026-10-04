@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -101,8 +102,10 @@ func TestSeal_TamperedAndMalformed(t *testing.T) {
 	}
 }
 
-// stubStore is an in-memory TokenStore.
+// stubStore is an in-memory TokenStore, safe for concurrent use. Sequential
+// tests may read rows directly.
 type stubStore struct {
+	mu      sync.Mutex
 	rows    map[[2]string][]byte
 	saveErr error
 }
@@ -110,10 +113,14 @@ type stubStore struct {
 func newStubStore() *stubStore { return &stubStore{rows: map[[2]string][]byte{}} }
 
 func (s *stubStore) Load(_ context.Context, u, p string) ([]byte, error) {
-	return s.rows[[2]string{u, p}], nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return bytes.Clone(s.rows[[2]string{u, p}]), nil
 }
 
 func (s *stubStore) Save(_ context.Context, u, p string, b []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.saveErr != nil {
 		return s.saveErr
 	}
@@ -122,8 +129,17 @@ func (s *stubStore) Save(_ context.Context, u, p string, b []byte) error {
 }
 
 func (s *stubStore) Delete(_ context.Context, u, p string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.rows, [2]string{u, p})
 	return nil
+}
+
+// row returns the blob for (u, p), nil when there is none.
+func (s *stubStore) row(u, p string) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return bytes.Clone(s.rows[[2]string{u, p}])
 }
 
 func TestCallback_SavesSealedTokens(t *testing.T) {

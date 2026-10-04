@@ -36,6 +36,8 @@ type Plugin struct {
 	discMu sync.Mutex
 	disc   map[string]cachedMeta // discovery documents by provider name
 
+	tok tokenState // opened tokens, refreshes in flight, revocations; see client.go
+
 	now func() time.Time // the clock; nil is time.Now. Tests set it.
 }
 

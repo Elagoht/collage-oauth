@@ -197,6 +197,10 @@ func (p *Plugin) saveTokens(ctx context.Context, name, userID string, tok *token
 		stage = "saving"
 		err = p.opts.Store.Save(ctx, userID, name, blob)
 	}
+	// Client's cache must not keep handing out the tokens of the earlier sign-in.
+	p.tok.mu.Lock()
+	p.tok.drop(tokenKey{userID, name})
+	p.tok.mu.Unlock()
 	if err != nil {
 		// Never err's text: a store's error may quote what it was given.
 		p.host.Logger().Error("elagoht/oauth: keeping the tokens failed; the sign-in stands",
@@ -214,34 +218,23 @@ func (p *Plugin) exchange(ctx context.Context, pr *provider, meta *metadata, cod
 	})
 }
 
-// tokenRequest POSTs form to the token endpoint with the client's credentials:
-// HTTP Basic when the provider lists client_secret_basic or lists nothing, form
-// fields otherwise. The answer must be a 200 of at most 1 MiB with an access
-// token. Errors carry the status at most, never the body.
+// tokenRequest POSTs form to the token endpoint with the client's credentials
+// (see authPost). The answer must be a 200 of at most 1 MiB with an access
+// token. Errors carry the status at most, never the body; a refusal is a
+// *tokenError, whose code the caller may check.
 func (p *Plugin) tokenRequest(ctx context.Context, pr *provider, meta *metadata, form url.Values) (*tokenResponse, error) {
-	basic := len(meta.TokenAuthMethods) == 0 || slices.Contains(meta.TokenAuthMethods, "client_secret_basic")
-	if !basic {
-		form.Set("client_id", pr.cfg.ClientID)
-		form.Set("client_secret", pr.secret)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, meta.TokenEndpoint, strings.NewReader(form.Encode()))
+	resp, err := p.authPost(ctx, pr, meta, meta.TokenEndpoint, form)
 	if err != nil {
-		return nil, errors.New("oauth: bad token endpoint")
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	if basic {
-		// RFC 6749 2.3.1: both are form-encoded before Basic.
-		req.SetBasicAuth(url.QueryEscape(pr.cfg.ClientID), url.QueryEscape(pr.secret))
-	}
-	resp, err := p.client().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("oauth: token endpoint: %w", stripURL(err))
+		return nil, fmt.Errorf("oauth: token endpoint: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, maxResponse)).Decode(&e)
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponse))
-		return nil, fmt.Errorf("oauth: token endpoint answered %d", resp.StatusCode)
+		return nil, &tokenError{status: resp.StatusCode, code: e.Error}
 	}
 	var tok tokenResponse
 	if err := decodeLimited(resp.Body, &tok); err != nil {
@@ -251,6 +244,43 @@ func (p *Plugin) tokenRequest(ctx context.Context, pr *provider, meta *metadata,
 		return nil, errors.New("oauth: token endpoint gave no access token")
 	}
 	return &tok, nil
+}
+
+// tokenError is a token endpoint's refusal. Its text is the status only.
+type tokenError struct {
+	status int
+	code   string // the answer's "error", when it had one
+}
+
+func (e *tokenError) Error() string {
+	return fmt.Sprintf("oauth: token endpoint answered %d", e.status)
+}
+
+// authPost POSTs form to endpoint with the client's credentials, as RFC 6749
+// 2.3.1 and RFC 7009 2.1 ask: HTTP Basic when the provider lists
+// client_secret_basic or lists nothing, form fields otherwise. A transport
+// error comes back without the request URL.
+func (p *Plugin) authPost(ctx context.Context, pr *provider, meta *metadata, endpoint string, form url.Values) (*http.Response, error) {
+	basic := len(meta.TokenAuthMethods) == 0 || slices.Contains(meta.TokenAuthMethods, "client_secret_basic")
+	if !basic {
+		form.Set("client_id", pr.cfg.ClientID)
+		form.Set("client_secret", pr.secret)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, errors.New("bad endpoint")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	if basic {
+		// Both are form-encoded before Basic.
+		req.SetBasicAuth(url.QueryEscape(pr.cfg.ClientID), url.QueryEscape(pr.secret))
+	}
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return nil, stripURL(err)
+	}
+	return resp, nil
 }
 
 // userinfoResponse is the part of the userinfo answer the plugin reads.

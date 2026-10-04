@@ -86,6 +86,10 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 	mux.HandleFunc("/token", f.token)
 	mux.HandleFunc("/userinfo", f.userinfo)
 	mux.HandleFunc("/revoke", f.revoke)
+	// /api stands for the provider's API: it echoes the Authorization it got.
+	mux.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.Header.Get("Authorization")))
+	})
 	f.srv = httptest.NewTLSServer(mux)
 	t.Cleanup(f.srv.Close)
 	f.URL = f.srv.URL
