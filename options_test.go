@@ -79,6 +79,14 @@ func TestOptions_Invalid(t *testing.T) {
 		"prefix no slash":             func(o *oauth.Options) { o.Prefix = "auth" },
 		"errorPath absolute":          func(o *oauth.Options) { o.ErrorPath = "https://evil.example/x" },
 		"errorPath protocol-relative": func(o *oauth.Options) { o.ErrorPath = "//evil.example" },
+		"http issuer": func(o *oauth.Options) {
+			o.Providers[0].Preset, o.Providers[0].Issuer = "", "http://id.example.com"
+		},
+		"http issuer over a preset": func(o *oauth.Options) { o.Providers[0].Issuer = "http://id.example.com" },
+		"http issuer named like localhost": func(o *oauth.Options) {
+			o.Providers[0].Preset, o.Providers[0].Issuer = "", "http://localhost.example.com"
+		},
+		"issuer without a scheme": func(o *oauth.Options) { o.Providers[0].Preset, o.Providers[0].Issuer = "", "id.example.com" },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -106,6 +114,14 @@ func TestOptions_Valid(t *testing.T) {
 			Providers: []oauth.Provider{{Name: "corp", Issuer: "https://id.example.com", ClientID: "x", ClientSecretEnv: "OAUTH_TEST_SECRET"}},
 			OnLogin:   onLogin, Store: &stubStore{}, KeyHex: strings.Repeat("cd", 32),
 			PreviousKeysHex: []string{strings.Repeat("ef", 32)}, Prefix: "/sso/",
+		},
+		"http issuer on loopback": {
+			Providers: []oauth.Provider{
+				{Name: "a", Issuer: "http://localhost:9000", ClientID: "x", ClientSecret: "s"},
+				{Name: "b", Issuer: "http://127.0.0.1:9000", ClientID: "x", ClientSecret: "s"},
+				{Name: "c", Issuer: "http://[::1]:9000", ClientID: "x", ClientSecret: "s"},
+			},
+			OnLogin: onLogin,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

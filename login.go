@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -84,7 +85,7 @@ func (p *Plugin) fail(w http.ResponseWriter, r *http.Request, code string, statu
 			q := u.Query()
 			q.Set("error", code)
 			u.RawQuery = q.Encode()
-			http.Redirect(w, r, u.String(), http.StatusSeeOther)
+			seeOther(w, u.String())
 			return
 		}
 	}
@@ -136,10 +137,7 @@ func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *
 			return
 		}
 	}
-	raw, err := json.Marshal(pd)
-	if err == nil {
-		err = sess.Set(pendingKey(name), string(raw))
-	}
+	err = p.keepPending(sess, name, pd)
 	if err != nil {
 		p.host.Logger().Error("elagoht/oauth: keeping the sign-in in the session failed", "error", err)
 		p.host.ServeStatus(w, r, http.StatusInternalServerError)
@@ -162,14 +160,35 @@ func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *
 		}
 	}
 	endpoint.RawQuery = q.Encode()
-	http.Redirect(w, r, endpoint.String(), http.StatusSeeOther)
+	seeOther(w, endpoint.String())
+}
+
+// keepPending stores pd in the session. When the session cannot hold it, the
+// sign-in is kept without its next, ending at AfterLogin: a next under maxNext
+// can still be too much for a session that holds data of its own.
+func (p *Plugin) keepPending(sess *session.Session, name string, pd pending) error {
+	raw, err := encodePending(pd)
+	if err != nil {
+		return err
+	}
+	err = sess.Set(pendingKey(name), raw)
+	if !errors.Is(err, session.ErrTooLarge) || pd.Next == p.opts.AfterLogin {
+		return err
+	}
+	pd.Next = p.opts.AfterLogin
+	if raw, err = encodePending(pd); err != nil {
+		return err
+	}
+	return sess.Set(pendingKey(name), raw)
 }
 
 // requestedScopes is what login asks the provider for, and what a token is
 // recorded as holding when the provider does not say.
 func requestedScopes(pr *provider) []string {
 	scopes := append([]string{"openid", "email", "profile"}, pr.cfg.Scopes...)
-	if pr.cfg.Offline && pr.preset.offlineScope {
+	// Without a preset the provider is plain OpenID Connect, where the
+	// offline_access scope is how a refresh token is asked for (Core 11).
+	if pr.cfg.Offline && (pr.preset.offlineScope || pr.cfg.Preset == "") {
 		scopes = append(scopes, "offline_access")
 	}
 	return uniqueScopes(scopes)
@@ -185,4 +204,16 @@ func uniqueScopes(in []string) []string {
 		}
 	}
 	return out
+}
+
+// encodePending is pd as JSON without HTML escapes, so "<" stays one byte in a
+// cookie that has a size limit.
+func encodePending(pd pending) (string, error) {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(pd); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(b.String(), "\n"), nil
 }

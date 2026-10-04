@@ -179,6 +179,9 @@ func resolveProvider(cfg Provider) (*provider, error) {
 	} else if cfg.Issuer == "" {
 		return nil, fmt.Errorf("oauth: provider %q needs a preset or an issuer", cfg.Name)
 	}
+	if !secureURL(pr.issuerOf()) {
+		return nil, fmt.Errorf("oauth: provider %q: issuer %q must be https (or http to localhost or a loopback IP)", cfg.Name, pr.issuerOf())
+	}
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("oauth: provider %q has no clientID", cfg.Name)
 	}

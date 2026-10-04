@@ -137,7 +137,31 @@ func (p *Plugin) callback(w http.ResponseWriter, r *http.Request, name string, p
 	}
 	// The session cookie is signed, so next is what login stored; checked again
 	// all the same, since it is about to be a Location.
-	http.Redirect(w, r, collage.SafeRedirect(pd.Next, p.opts.AfterLogin), http.StatusSeeOther)
+	seeOther(w, collage.SafeRedirect(pd.Next, p.opts.AfterLogin))
+}
+
+// seeOther answers 303 to location, written as given: http.Redirect would clean
+// a rooted path first, and a cleaned path is not the one that was checked. Bytes
+// past ASCII are escaped, as http.Redirect would; there is no body.
+func seeOther(w http.ResponseWriter, location string) {
+	w.Header().Set("Location", escapeNonASCII(location))
+	w.WriteHeader(http.StatusSeeOther)
+}
+
+// escapeNonASCII percent-encodes each byte at or above 0x80.
+func escapeNonASCII(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 0x80 {
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0xf])
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // signIn signs the session in as userID under a new session ID, so an ID planted
@@ -282,7 +306,7 @@ func (e *tokenError) Error() string {
 // authPost POSTs form to endpoint with the client's credentials, as RFC 6749
 // 2.3.1 and RFC 7009 2.1 ask: HTTP Basic when the provider lists
 // client_secret_basic or lists nothing, form fields otherwise. A transport
-// error comes back without the request URL.
+// error comes back without the request URL. Redirects are not followed.
 func (p *Plugin) authPost(ctx context.Context, pr *provider, meta *metadata, endpoint string, form url.Values) (*http.Response, error) {
 	basic := len(meta.TokenAuthMethods) == 0 || slices.Contains(meta.TokenAuthMethods, "client_secret_basic")
 	if !basic {
@@ -299,7 +323,11 @@ func (p *Plugin) authPost(ctx context.Context, pr *provider, meta *metadata, end
 		// Both are form-encoded before Basic.
 		req.SetBasicAuth(url.QueryEscape(pr.cfg.ClientID), url.QueryEscape(pr.secret))
 	}
-	resp, err := p.client().Do(req)
+	// A redirect is never followed: a 307 or 308 would send the form, and the
+	// client secret with it, wherever it points. The 3xx is the answer.
+	nc := *p.client()
+	nc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := nc.Do(req)
 	if err != nil {
 		return nil, stripURL(err)
 	}

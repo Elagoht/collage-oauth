@@ -139,7 +139,13 @@ func newCallbackAppWith(t *testing.T, errorPath string, onLogin LoginFunc, tune 
 // have seen with the fake under code. It returns the state.
 func (a *callbackApp) login(t *testing.T, code string) string {
 	t.Helper()
-	res := a.c.Get("/auth/test/login?next=/panel").WantStatus(http.StatusSeeOther)
+	return a.loginNext(t, code, "/panel")
+}
+
+// loginNext is login with the given next.
+func (a *callbackApp) loginNext(t *testing.T, code, next string) string {
+	t.Helper()
+	res := a.c.Get("/auth/test/login?next=" + url.QueryEscape(next)).WantStatus(http.StatusSeeOther)
 	u, err := url.Parse(res.Location())
 	if err != nil {
 		t.Fatal(err)
@@ -571,5 +577,71 @@ func TestCallback_SignInOverAnotherUser(t *testing.T) {
 			}
 			a.wantSignedIn(t)
 		})
+	}
+}
+
+// The final Location is written as stored, not through http.Redirect, which
+// would clean the path ("/panel/./x" into "/panel/x"); bytes past ASCII are
+// still escaped, as http.Redirect would.
+func TestCallback_LocationIsWrittenAsChecked(t *testing.T) {
+	for next, want := range map[string]string{
+		"/panel/./x":      "/panel/./x",
+		"/çay":            "/%C3%A7ay",
+		`/./\evil.com`:    "/",
+		`/a/../\evil.com`: "/",
+		"/panel?q=1#frag": "/panel?q=1#frag",
+	} {
+		a := newCallbackApp(t, "", nil)
+		state := a.loginNext(t, "c1", next)
+		res := a.callback("c1", state).WantStatus(http.StatusSeeOther)
+		if got := res.Location(); got != want {
+			t.Errorf("next %q: Location = %q, want %q", next, got, want)
+		}
+		if res.Body != "" {
+			t.Errorf("next %q: body %q, want none", next, res.Body)
+		}
+	}
+}
+
+// A token or revocation endpoint that answers 307 must not get the form, client
+// secret included, re-sent to wherever it points.
+func TestAuthPost_DoesNotFollowRedirects(t *testing.T) {
+	var got []string
+	var mu sync.Mutex
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		got = append(got, r.URL.Path+" "+string(body))
+		mu.Unlock()
+	}))
+	t.Cleanup(other.Close)
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	fp := newFakeProvider(t)
+	fp.Discovery = func(d *fakeDiscovery) {
+		d.RevocationEndpoint = redirector.URL + "/revoke"
+		d.TokenAuthMethods = []string{"client_secret_post"}
+	}
+	p, pr := discoveryPlugin(t, fp, presetSpec{})
+	p.providers = map[string]*provider{"fake": pr}
+	ctx := context.Background()
+
+	meta := &metadata{TokenEndpoint: redirector.URL + "/token", TokenAuthMethods: []string{"client_secret_post"}}
+	if _, err := p.tokenRequest(ctx, pr, meta, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {"r"}}); err == nil {
+		t.Error("token request: a 307 was taken for an answer")
+	}
+	if err := p.revokeAtProvider(ctx, pr, stored{RefreshToken: "r"}); err == nil {
+		t.Error("revocation: a 307 was taken for an answer")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 0 {
+		t.Errorf("the redirect target received %q", got)
+	}
+	if p.opts.HTTPClient.CheckRedirect != nil {
+		t.Error("the application's HTTPClient was changed")
 	}
 }

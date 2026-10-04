@@ -144,7 +144,7 @@ func TestLogin_RedirectsToTheProviderWithPKCE(t *testing.T) {
 }
 
 func TestLogin_UnsafeNextBecomesAfterLogin(t *testing.T) {
-	for _, next := range []string{"//evil.com", `/\evil.com`, "https://evil.com", "javascript:x"} {
+	for _, next := range []string{"//evil.com", `/\evil.com`, "https://evil.com", "javascript:x", `/./\evil.com`, `/a/../\evil.com`} {
 		a := newLoginApp(t, true)
 		a.c.Get("/auth/test/login?next=" + url.QueryEscape(next)).WantStatus(http.StatusSeeOther)
 		if got := a.peek(t, "").Next; got != "/" {
@@ -165,13 +165,16 @@ func TestLogin_AgainReplacesThePending(t *testing.T) {
 
 func TestLogin_OfflineParameters(t *testing.T) {
 	cases := map[string]struct {
-		preset  presetSpec
+		preset  string
 		wantQ   url.Values
 		wantOff bool
 	}{
-		"google-like":    {presets["google"], url.Values{"access_type": {"offline"}, "prompt": {"consent"}}, false},
-		"microsoft-like": {presets["microsoft"], nil, true},
-		"plain":          {presetSpec{}, nil, false},
+		"google":    {"google", url.Values{"access_type": {"offline"}, "prompt": {"consent"}}, false},
+		"microsoft": {"microsoft", nil, true},
+		"gitlab":    {"gitlab", nil, false},
+		// A custom issuer is standard OpenID Connect: offline_access asks for
+		// the refresh token.
+		"no preset": {"", nil, true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -179,7 +182,7 @@ func TestLogin_OfflineParameters(t *testing.T) {
 			pr := a.p.providers["test"]
 			pr.cfg.Offline = true
 			pr.cfg.Scopes = []string{"calendar"}
-			pr.preset = presetSpec{authParams: tc.preset.authParams, offlineScope: tc.preset.offlineScope}
+			pr.cfg.Preset, pr.preset = tc.preset, presets[tc.preset]
 			res := a.c.Get("/auth/test/login").WantStatus(http.StatusSeeOther)
 			u, _ := url.Parse(res.Location())
 			q := u.Query()
@@ -314,4 +317,62 @@ func TestLogin_OnlyGETTouchesTheSignIn(t *testing.T) {
 	if after := a.peek(t, ""); after != before {
 		t.Errorf("pending changed: %+v -> %+v", before, after)
 	}
+}
+
+// The redirects login and fail write carry the Location and no body, and fail
+// sends ErrorPath as configured, uncleaned.
+func TestLogin_RedirectsAreWrittenRaw(t *testing.T) {
+	a := newLoginApp(t, true)
+	res := a.c.Get("/auth/test/login").WantStatus(http.StatusSeeOther)
+	if res.Body != "" {
+		t.Errorf("login: body %q, want none", res.Body)
+	}
+	b := newLoginApp(t, true)
+	b.p.opts.ErrorPath = "/oops/./x"
+	b.f.DiscoveryStatus = http.StatusInternalServerError
+	res = b.c.Get("/auth/test/login").WantStatus(http.StatusSeeOther)
+	if got := res.Location(); got != "/oops/./x?error=unavailable" {
+		t.Errorf("fail: Location = %q", got)
+	}
+	if res.Body != "" {
+		t.Errorf("fail: body %q, want none", res.Body)
+	}
+}
+
+// The pending sign-in is JSON without HTML escapes: "<" stays one byte, so an
+// escape-heavy next does not grow the session cookie sixfold.
+func TestPending_EncodedWithoutHTMLEscapes(t *testing.T) {
+	raw, err := encodePending(pending{Next: "/<a>&b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, `"/<a>&b"`) || strings.HasSuffix(raw, "\n") {
+		t.Errorf("encoded %q", raw)
+	}
+	if got := decodePending(t, raw); got.Next != "/<a>&b" {
+		t.Errorf("round trip gave %q", got.Next)
+	}
+}
+
+// A next within the 1024-byte cap that the session still cannot hold ends at
+// AfterLogin rather than in a 500.
+func TestLogin_NextTooLargeForTheSessionEndsAtAfterLogin(t *testing.T) {
+	t.Run("escape-heavy next", func(t *testing.T) {
+		a := newLoginApp(t, true)
+		a.c.Get("/auth/test/login?next=" + url.QueryEscape("/"+strings.Repeat("<", 1023))).WantStatus(http.StatusSeeOther)
+		if got := a.peek(t, "").Next; got != "/" {
+			t.Errorf("stored a %d-byte next, want AfterLogin", len(got))
+		}
+	})
+	t.Run("session near its limit", func(t *testing.T) {
+		a := newLoginApp(t, true, sidPlugin{})
+		a.c.Get("/kv?k=fill&v=" + strings.Repeat("x", 2000)).WantStatus(http.StatusOK)
+		a.c.Get("/auth/test/login?next=/" + strings.Repeat("a", 1000)).WantStatus(http.StatusSeeOther)
+		if got := a.peek(t, "").Next; got != "/" {
+			t.Errorf("stored a %d-byte next, want AfterLogin", len(got))
+		}
+		if got := a.c.Get("/kv?k=fill").Body; len(got) != 2000 {
+			t.Errorf("the session lost its own data: %d bytes", len(got))
+		}
+	})
 }

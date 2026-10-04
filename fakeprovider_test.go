@@ -49,6 +49,8 @@ type fakeProvider struct {
 	IDTokenNumbers map[string]int64
 	// Issuer, when set, is what the discovery document claims as its issuer.
 	Issuer string
+	// Discovery, when set, edits the discovery document before it is sent.
+	Discovery func(*fakeDiscovery)
 	// DiscoveryStatus, when non-zero, is answered instead of the document.
 	DiscoveryStatus int
 	// TokenStatus, when non-zero, is answered by /token for the code grant.
@@ -156,14 +158,18 @@ func (f *fakeProvider) discovery(w http.ResponseWriter, _ *http.Request) {
 	if f.Issuer != "" {
 		issuer = f.Issuer
 	}
-	writeJSON(w, http.StatusOK, fakeDiscovery{
+	doc := fakeDiscovery{
 		Issuer:                issuer,
 		AuthorizationEndpoint: f.URL + "/authorize",
 		TokenEndpoint:         f.URL + "/token",
 		UserinfoEndpoint:      f.URL + "/userinfo",
 		RevocationEndpoint:    f.URL + "/revoke",
 		TokenAuthMethods:      []string{"client_secret_basic"},
-	})
+	}
+	if f.Discovery != nil {
+		f.Discovery(&doc)
+	}
+	writeJSON(w, http.StatusOK, doc)
 }
 
 type fakeTokenResponse struct {

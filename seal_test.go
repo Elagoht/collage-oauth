@@ -222,9 +222,17 @@ func TestCallback_ReSignInKeepsTheRefreshToken(t *testing.T) {
 }
 
 func TestCallback_OfflineScopeIsRecorded(t *testing.T) {
-	pr := &provider{cfg: Provider{Offline: true}, preset: presetSpec{offlineScope: true}}
-	if got := strings.Join(requestedScopes(pr), " "); got != "openid email profile offline_access" {
-		t.Errorf("requestedScopes = %q", got)
+	for name, pr := range map[string]*provider{
+		"microsoft": {cfg: Provider{Preset: "microsoft", Offline: true}, preset: presets["microsoft"]},
+		"no preset": {cfg: Provider{Issuer: "https://id.example", Offline: true}},
+	} {
+		if got := strings.Join(requestedScopes(pr), " "); got != "openid email profile offline_access" {
+			t.Errorf("%s: requestedScopes = %q", name, got)
+		}
+	}
+	pr := &provider{cfg: Provider{Preset: "gitlab", Offline: true}, preset: presets["gitlab"]}
+	if got := strings.Join(requestedScopes(pr), " "); got != "openid email profile" {
+		t.Errorf("gitlab: requestedScopes = %q", got)
 	}
 }
 

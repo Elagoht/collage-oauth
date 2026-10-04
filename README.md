@@ -55,9 +55,17 @@ v0.2.1 or later. Register elagoht/session too: without it the login routes answe
 Both routes answer `GET` only: a `HEAD` (a link preview) must not start or spend a
 sign-in, so any other method is a `405`.
 
-`next` must be a path on this site. An absolute URL, `//host`, `/\host` and
+`next` must be a path on this site. An absolute URL, `//host`, `/\host`, a
+backslash anywhere, a path that cleans into one of those (`/./\host`) and
 `javascript:` all end at `afterLogin` instead, and so does a `next` longer than
-1024 bytes, because the pending sign-in lives in the session cookie.
+1024 bytes, because the pending sign-in lives in the session cookie. A shorter
+`next` that the session still cannot hold (it holds data of its own) also ends at
+`afterLogin`. The final redirect is written exactly as checked, not cleaned again.
+
+The session cookie must reach the callback, which is a navigation from the
+provider's site: keep elagoht/session's `sameSite` at its default, `"lax"`.
+With `"strict"` the browser leaves the cookie off and every sign-in fails with
+`state`.
 
 ## Options
 
@@ -79,17 +87,19 @@ A provider:
 | --- | --- | --- |
 | `Name` | `name` | The URL segment, one segment without control characters, unique. Required |
 | `Preset` | `preset` | `"google"`, `"microsoft"` or `"gitlab"`: fills the issuer and the provider's own parameters |
-| `Issuer` | `issuer` | The OpenID Connect issuer, when there is no preset. Its `/.well-known/openid-configuration` is read |
+| `Issuer` | `issuer` | The OpenID Connect issuer. Its `/.well-known/openid-configuration` is read. With a preset it overrides the preset's issuer (one Microsoft tenant, say). `https`, or `http` only to `localhost` or a loopback IP |
 | `ClientID` | `clientID` | Required |
 | `ClientSecretEnv` | `clientSecretEnv` | The name of the environment variable holding the client secret |
 | `ClientSecret` | not configurable | The secret, set from Go instead |
 | `Scopes` | `scopes` | Asked for besides `openid email profile` |
 | `Offline` | `offline` | Ask for a refresh token |
 
-Exactly one of a preset or an issuer is needed, and so is a client secret that is
-set (an empty environment variable is not set). The application does not start for
-any of: no providers, a provider without a name or with a name used twice, an
-unknown preset, neither preset nor issuer, no client ID, no client secret, a
+A preset or an issuer is needed. With both, the preset gives its parameters and
+the issuer replaces the preset's. A client secret that is set is needed too (an
+empty environment variable is not set). The application does not start for any
+of: no providers, a provider without a name or with a name used twice, an unknown
+preset, neither preset nor issuer, an issuer that is not `https` (plain `http` is
+allowed only to `localhost` and loopback IPs), no client ID, no client secret, a
 `Store` without a `Key`, a key under 32 bytes or not valid hex (the error names no
 byte of it), no `OnLogin`, a prefix that does not start with `/`, an `errorPath`
 that is not a path on this site.
@@ -119,10 +129,23 @@ plugin's options.
 | `google` | `https://accounts.google.com` | `access_type=offline&prompt=consent` |
 | `microsoft` | `https://login.microsoftonline.com/common/v2.0`; a tenant-specific issuer is accepted | the `offline_access` scope |
 | `gitlab` | `https://gitlab.com` | nothing added: GitLab gives a refresh token with every code exchange |
+| none (an `issuer`) | the configured one | the `offline_access` scope, as OpenID Connect asks |
+
+**The `microsoft` preset alone accepts any Entra ID tenant and any personal
+Microsoft account.** It uses the `common` endpoint, so every work, school and
+personal account can sign in. To admit one organisation only, set `issuer` to its
+tenant, `https://login.microsoftonline.com/<tenant-id>/v2.0`: with an `issuer` set,
+the issuer must match it exactly. Microsoft's id_token has no `email_verified`
+claim, so `EmailVerified` is always false for it; do not match accounts by its
+e-mail.
 
 Discovery is read on first use, not at start, so a site still starts when a
 provider is down. It is cached for an hour; a failed read is not cached. A document
-whose `issuer` is not the configured one is refused.
+whose `issuer` is not the configured one is refused, and so is one that names an
+authorization, token, userinfo or revocation endpoint that is not `https` (or
+`http` to loopback); the sign-in then ends with `unavailable`. Calls to the token
+and revocation endpoints never follow a redirect, so a `307` cannot send the client
+secret to another host.
 
 ## OnLogin
 
@@ -247,7 +270,7 @@ collage.NewAction("logout").WithPath("en", "/logout").WithMethods(http.MethodPos
 		}
 		s.Clear()
 		return &collage.ActionResult{Location: "/"}, nil
-	})
+	}).Build()
 ```
 
 ## Limits

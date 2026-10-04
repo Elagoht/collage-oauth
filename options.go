@@ -47,7 +47,9 @@ type Provider struct {
 	// Preset fills the issuer and the provider's own parameters: "google",
 	// "microsoft" or "gitlab".
 	Preset string `json:"preset"`
-	// Issuer is the OpenID Connect issuer, when there is no Preset.
+	// Issuer is the OpenID Connect issuer. With a Preset it replaces the preset's
+	// issuer (one Microsoft tenant) and must then be matched exactly. https, or
+	// http only to localhost or a loopback IP.
 	Issuer string `json:"issuer"`
 	// ClientID is the application's ID at the provider. Required.
 	ClientID string `json:"clientID"`
@@ -57,7 +59,8 @@ type Provider struct {
 	ClientSecret string `json:"-"`
 	// Scopes are asked for besides "openid email profile".
 	Scopes []string `json:"scopes"`
-	// Offline asks the provider for a refresh token.
+	// Offline asks the provider for a refresh token: the preset's way, or the
+	// offline_access scope when there is no preset.
 	Offline bool `json:"offline"`
 }
 
