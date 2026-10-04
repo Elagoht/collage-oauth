@@ -173,8 +173,7 @@ func (p *Plugin) saveTokens(ctx context.Context, name, userID string, tok *token
 	if p.opts.Store == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveTimeout)
-	defer cancel()
+	ctx = context.WithoutCancel(ctx)
 	scopes := strings.Fields(tok.Scope)
 	if len(scopes) == 0 {
 		scopes = requestedScopes(p.providers[name])
@@ -187,13 +186,30 @@ func (p *Plugin) saveTokens(ctx context.Context, name, userID string, tok *token
 	// after it, and its waiters ask again for these tokens; meanwhile no refresh
 	// starts. Client's cache is dropped, so the earlier tokens are not handed out.
 	// The wait comes first, so a rotation by that refresh is the one kept below.
+	// The wait has its own bound, so the store calls below keep their full
+	// saveTimeout whatever it took.
 	k := tokenKey{userID, name}
 	c := p.tok.acquire(k, false)
 	defer p.tok.release(k, false)
-	if waitFor(ctx, c) != nil {
-		// Bounded by saveTimeout; the refresh is bounded too, so this is rare.
-		p.host.Logger().Warn("elagoht/oauth: a refresh in flight outlasted the sign-in's wait", "provider", name, "user", userID)
+	if c != nil {
+		wait := p.tok.signInWait
+		if wait <= 0 {
+			wait = fetchTimeout
+		}
+		waitCtx, cancelWait := context.WithTimeout(ctx, wait)
+		if waitFor(waitCtx, c) != nil {
+			// The call cannot save after this: it checks for the sign-in first.
+			p.host.Logger().Warn("elagoht/oauth: a refresh in flight outlasted the sign-in's wait", "provider", name, "user", userID)
+		}
+		cancelWait()
+		p.tok.mu.Lock()
+		if t.RefreshToken == "" {
+			t.RefreshToken = c.handoff.RefreshToken
+		}
+		p.tok.mu.Unlock()
 	}
+	ctx, cancel := context.WithTimeout(ctx, saveTimeout)
+	defer cancel()
 	if t.RefreshToken == "" {
 		// A sign-in that returns no refresh token keeps the one already stored.
 		if old, err := p.opts.Store.Load(ctx, userID, name); err == nil && len(old) > 0 {

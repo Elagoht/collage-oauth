@@ -626,12 +626,145 @@ func TestBearer_HostRules(t *testing.T) {
 	}
 	for raw, want := range map[string]bool{
 		"https://api.example.com/": true, "HTTPS://x/": true,
-		"http://127.0.0.1:8080/": true, "http://[::1]/": true, "http://LOCALHOST/": true, "http://a.localhost/": true,
+		"http://127.0.0.1:8080/": true, "http://[::1]/": true, "http://LOCALHOST/": true, "http://127.0.0.5/": true,
+		"http://a.localhost/": false, "http://localhost.example.com/": false,
 		"http://api.example.com/": false, "http://10.0.0.1/": false, "ftp://x/": false,
 	} {
 		u, _ := url.Parse(raw)
 		if got := clearTextOK(u); got != want {
 			t.Errorf("clearTextOK(%s) = %v", raw, got)
 		}
+	}
+}
+
+// nilRequest is a transport that leaves Response.Request unset, as a mock or a
+// recorder may.
+type nilRequest struct{ base http.RoundTripper }
+
+func (n nilRequest) RoundTrip(req *http.Request) (*http.Response, error) {
+	res, err := n.base.RoundTrip(req)
+	if res != nil {
+		res.Request = nil
+	}
+	return res, err
+}
+
+// recorder answers 200 and keeps the Authorization of each request.
+type recorder struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (r *recorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	r.seen = append(r.seen, req.Header.Get("Authorization"))
+	r.mu.Unlock()
+	return &http.Response{StatusCode: 200, Body: http.NoBody, Header: http.Header{}, Request: req}, nil
+}
+
+func TestBearer_FailsClosedWithoutTheChain(t *testing.T) {
+	a, _ := newClientApp(t, nil)
+	a.callback("c1", a.login(t, "c1")).WantStatus(303)
+
+	t.Run("a transport that leaves Response.Request unset", func(t *testing.T) {
+		seen := make(chan string, 1)
+		other := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			seen <- r.Header.Get("Authorization")
+		}))
+		t.Cleanup(other.Close)
+		otherURL, _ := url.Parse(other.URL)
+		c := &http.Client{Transport: &bearer{p: a.p, userID: "app-user", provider: "test", base: nilRequest{a.f.Client.Transport}}}
+		res, err := c.Get(a.f.URL + "/redirect?to=" + url.QueryEscape("http://localhost:"+otherURL.Port()+"/"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if got := <-seen; got != "" {
+			t.Errorf("the other host got %q", got)
+		}
+		if res.Request == nil {
+			t.Error("Response.Request is still unset")
+		}
+	})
+	t.Run("a hop whose chain breaks gets no token", func(t *testing.T) {
+		rec := &recorder{}
+		b := &bearer{p: a.p, userID: "app-user", provider: "test", base: rec}
+		req, _ := http.NewRequest(http.MethodGet, a.f.URL+"/api", nil)
+		req.Response = &http.Response{} // a redirect hop with no Request behind it
+		res, err := b.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		first, _ := http.NewRequest(http.MethodGet, a.f.URL+"/api", nil)
+		res, err = b.RoundTrip(first)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		if !slices.Equal(rec.seen, []string{"", "Bearer access-c1"}) {
+			t.Errorf("Authorization sent = %q; want none on the broken hop, the token on a first request", rec.seen)
+		}
+	})
+}
+
+// A sign-in that gives up waiting for a refresh in flight saves; the refresh,
+// finishing later, does not save over it.
+func TestSignIn_SupersededRefreshFinishingLaterDoesNotSave(t *testing.T) {
+	a, st := newClientApp(t, nil)
+	a.p.tok.signInWait = 20 * time.Millisecond
+	entered, release := blockRefresh(t, a, 200)
+	put(t, a, st, "app-user", stored{AccessToken: "old-a", RefreshToken: "old-r", Expiry: a.p.clock().Unix() - 10})
+	type result struct {
+		auth string
+		err  error
+	}
+	clientRes := make(chan result, 1)
+	go func() {
+		c, err := a.p.Client(context.Background(), "app-user", "test")
+		if err != nil {
+			clientRes <- result{err: err}
+			return
+		}
+		got, err := callAPI(c, a.f.URL)
+		clientRes <- result{got, err}
+	}()
+	<-entered
+	a.callback("c2", a.login(t, "c2")).WantStatus(303) // waits 20ms, then saves
+	release()
+	if r := <-clientRes; r.err != nil || r.auth != "Bearer access-c2" {
+		t.Errorf("the in-flight Client = %q, %v; want Bearer access-c2", r.auth, r.err)
+	}
+	if got := opened(t, a, st, "app-user"); got.AccessToken != "access-c2" || got.RefreshToken != "refresh-c2" {
+		t.Errorf("stored = %+v; want the sign-in's tokens", got)
+	}
+}
+
+// A sign-in without a refresh token, over a refresh it superseded, keeps the
+// refresh token that refresh rotated to (Ruling 7), though the refresh did not save.
+func TestSignIn_KeepsTheSupersededRotation(t *testing.T) {
+	a, st := newClientApp(t, nil)
+	entered, release := blockRefresh(t, a, 200)
+	put(t, a, st, "app-user", stored{AccessToken: "old-a", RefreshToken: "old-r", Expiry: a.p.clock().Unix() - 10})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = a.p.Client(context.Background(), "app-user", "test")
+	}()
+	<-entered
+	a.f.NoRefreshToken = true
+	state := a.login(t, "c2")
+	signedIn := make(chan int, 1)
+	go func() { signedIn <- a.callback("c2", state).Status }()
+	waitHold(t, a.p, tokenKey{"app-user", "test"}, 0, 1)
+	release()
+	if got := <-signedIn; got != http.StatusSeeOther {
+		t.Fatalf("sign-in status %d", got)
+	}
+	<-done
+	if got := opened(t, a, st, "app-user"); got.AccessToken != "access-c2" || got.RefreshToken != "refreshed-r" {
+		t.Errorf("stored = %+v; want access-c2 with the rotated refreshed-r", got)
 	}
 }

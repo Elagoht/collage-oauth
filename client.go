@@ -37,6 +37,10 @@ type call struct {
 	// Set under tokenState.mu by a hold (see hold): the result is not kept.
 	revoked    bool // by Revoke: the waiters get ErrNotLinked
 	superseded bool // by a sign-in: the waiters ask again once it is saved
+
+	// handoff is what a superseded call would have saved, under mutex: the
+	// sign-in saves instead, and keeps its refresh token when it has none.
+	handoff stored
 }
 
 // hold keeps a key still while Revoke or a sign-in rewrites its row. While a
@@ -63,6 +67,10 @@ type tokenState struct {
 	entries map[tokenKey]*list.Element // of *cacheEntry, in order
 	order   *list.List                 // insertion order, oldest at the front
 	max     int                        // 0 is maxCached; tests lower it
+
+	// signInWait bounds how long a sign-in waits for the call in flight before
+	// it saves. 0 is fetchTimeout, by when the call has given up. Tests lower it.
+	signInWait time.Duration
 
 	// calls are the loads-and-refreshes in flight, one per key.
 	calls map[tokenKey]*call
@@ -228,31 +236,44 @@ var errInsecureHost = errors.New("oauth: Client refuses to send a token over pla
 // still followed, without the token. Plain http carries the token only to a
 // loopback host; a first request elsewhere over http fails with errInsecureHost.
 func (b *bearer) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Walk a redirect hop back to the first request. A hop whose chain breaks
+	// (a Response without its Request) has no first request to compare with:
+	// it fails closed, without the token.
 	first := req
-	for first.Response != nil && first.Response.Request != nil {
+	for first != nil && first.Response != nil {
 		first = first.Response.Request
 	}
 	attach := clearTextOK(req.URL)
-	if first == req {
+	switch {
+	case first == req:
 		if !attach {
 			closeBody(req)
 			return nil, errInsecureHost
 		}
-	} else {
+	case first == nil:
+		attach = false
+	default:
 		attach = attach && isDomainOrSubdomain(asciiLower(req.URL.Hostname()), asciiLower(first.URL.Hostname())) &&
 			!(asciiLower(first.URL.Scheme) == "https" && asciiLower(req.URL.Scheme) != "https")
 	}
-	if !attach {
-		return b.base.RoundTrip(req)
+	send := req
+	if attach {
+		tok, err := b.p.token(req.Context(), b.userID, b.provider)
+		if err != nil {
+			closeBody(req)
+			return nil, err
+		}
+		send = req.Clone(req.Context())
+		send.Header.Set("Authorization", "Bearer "+tok)
 	}
-	tok, err := b.p.token(req.Context(), b.userID, b.provider)
-	if err != nil {
-		closeBody(req)
-		return nil, err
+	resp, err := b.base.RoundTrip(send)
+	if resp != nil && resp.Request == nil {
+		// net/http's Client leaves this to the transport, and the next hop's
+		// walk needs it; a custom transport may not fill it in. The request
+		// without the token is enough to walk by.
+		resp.Request = req
 	}
-	r := req.Clone(req.Context())
-	r.Header.Set("Authorization", "Bearer "+tok)
-	return b.base.RoundTrip(r)
+	return resp, err
 }
 
 func closeBody(req *http.Request) {
@@ -267,8 +288,10 @@ func clearTextOK(u *url.URL) bool {
 	case "https":
 		return true
 	case "http":
+		// By name only "localhost" itself; otherwise a loopback IP literal
+		// (127.0.0.0/8, ::1).
 		h := asciiLower(u.Hostname())
-		if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		if h == "localhost" {
 			return true
 		}
 		ip := net.ParseIP(h)
@@ -451,6 +474,19 @@ func (p *Plugin) load(ctx context.Context, k tokenKey, pr *provider, c *call) (t
 		return stored{}, false, ErrNotLinked
 	}
 	if dirty {
+		// A sign-in that took over the key while this call ran saves its own
+		// tokens, taking this call's refresh token over when it has none; were
+		// its wait for this call to give up, this save must not land after it. (A revoked call still saves: Revoke always waits for it
+		// and then revokes the newest refresh token.)
+		p.tok.mu.Lock()
+		superseded := c.superseded
+		if superseded {
+			c.handoff = t
+		}
+		p.tok.mu.Unlock()
+		if superseded {
+			return t, true, nil
+		}
 		stage := "sealing"
 		blob, err := p.seal(k.user, k.provider, t)
 		if err == nil {
