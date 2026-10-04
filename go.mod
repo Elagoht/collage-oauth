@@ -7,6 +7,6 @@ module github.com/Elagoht/collage-oauth
 
 go 1.26
 
-require github.com/Elagoht/collage v0.43.0
+require github.com/Elagoht/collage v0.44.0
 
 require github.com/Elagoht/collage-session v0.2.1
