@@ -161,28 +161,46 @@ func (p *Plugin) signIn(ctx context.Context, sess *session.Session, name, userID
 	return nil
 }
 
+// saveTimeout bounds the Store call, which outlives the request.
+const saveTimeout = 10 * time.Second
+
 // saveTokens seals tok and hands it to the Store. A failure is logged without
 // any token, and the sign-in still completes: the reader is signed in, only
-// Client will answer ErrNotLinked until the next sign-in.
+// Client will answer ErrNotLinked until the next sign-in. The save does not
+// share the request's cancellation: a browser that drops after the 303 must
+// not lose the tokens.
 func (p *Plugin) saveTokens(ctx context.Context, name, userID string, tok *tokenResponse) {
 	if p.opts.Store == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveTimeout)
+	defer cancel()
 	scopes := strings.Fields(tok.Scope)
 	if len(scopes) == 0 {
-		scopes = uniqueScopes(append([]string{"openid", "email", "profile"}, p.providers[name].cfg.Scopes...))
+		scopes = requestedScopes(p.providers[name])
 	}
 	t := stored{AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, Scopes: scopes}
 	if tok.ExpiresIn > 0 {
 		t.Expiry = p.clock().Unix() + tok.ExpiresIn
 	}
+	if t.RefreshToken == "" {
+		// A sign-in that returns no refresh token keeps the one already stored.
+		if old, err := p.opts.Store.Load(ctx, userID, name); err == nil && len(old) > 0 {
+			if prev, _, err := p.open(userID, name, old); err == nil {
+				t.RefreshToken = prev.RefreshToken
+			}
+		}
+	}
+	stage := "sealing"
 	blob, err := p.seal(userID, name, t)
 	if err == nil {
+		stage = "saving"
 		err = p.opts.Store.Save(ctx, userID, name, blob)
 	}
 	if err != nil {
-		// err is the Store's or the sealer's own; the plugin adds no token to it.
-		p.host.Logger().Error("elagoht/oauth: saving the tokens failed", "provider", name)
+		// Never err's text: a store's error may quote what it was given.
+		p.host.Logger().Error("elagoht/oauth: keeping the tokens failed; the sign-in stands",
+			"provider", name, "user", userID, "stage", stage, "canceled", errors.Is(err, context.Canceled))
 	}
 }
 

@@ -146,15 +146,12 @@ func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *
 		return
 	}
 
-	scopes := append([]string{"openid", "email", "profile"}, pr.cfg.Scopes...)
-	if pr.cfg.Offline && pr.preset.offlineScope {
-		scopes = append(scopes, "offline_access")
-	}
+	scopes := requestedScopes(pr)
 	q := endpoint.Query()
 	q.Set("response_type", "code")
 	q.Set("client_id", pr.cfg.ClientID)
 	q.Set("redirect_uri", redirect)
-	q.Set("scope", strings.Join(uniqueScopes(scopes), " "))
+	q.Set("scope", strings.Join(scopes, " "))
 	q.Set("state", pd.State)
 	q.Set("nonce", pd.Nonce)
 	q.Set("code_challenge", challenge(pd.Verifier))
@@ -166,6 +163,16 @@ func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *
 	}
 	endpoint.RawQuery = q.Encode()
 	http.Redirect(w, r, endpoint.String(), http.StatusSeeOther)
+}
+
+// requestedScopes is what login asks the provider for, and what a token is
+// recorded as holding when the provider does not say.
+func requestedScopes(pr *provider) []string {
+	scopes := append([]string{"openid", "email", "profile"}, pr.cfg.Scopes...)
+	if pr.cfg.Offline && pr.preset.offlineScope {
+		scopes = append(scopes, "offline_access")
+	}
+	return uniqueScopes(scopes)
 }
 
 func uniqueScopes(in []string) []string {

@@ -156,10 +156,51 @@ func TestCallback_SavesSealedTokens(t *testing.T) {
 
 func TestCallback_SaveFailureStillSignsIn(t *testing.T) {
 	st := newStubStore()
-	st.saveErr = errors.New("disk full: access-c1")
+	st.saveErr = errors.New("disk full: access-c1 refresh-c1")
 	a := newCallbackAppWith(t, "", nil, func(o *Options) { o.Store, o.Key = st, testKey(7) })
 	a.callback("c1", a.login(t, "c1")).WantStatus(303)
 	a.wantSignedIn(t)
+	out := a.logs.String()
+	if !strings.Contains(out, "keeping the tokens failed") {
+		t.Errorf("the failure was not logged: %s", out)
+	}
+	for _, secret := range []string{"access-c1", "refresh-c1", "disk full"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("the log holds %q: %s", secret, out)
+		}
+	}
+}
+
+func TestCallback_NoLifetimeStoresExpiryZero(t *testing.T) {
+	st := newStubStore()
+	a := newCallbackAppWith(t, "", func(context.Context, Identity) (string, error) { return "app-user", nil },
+		func(o *Options) { o.Store, o.Key = st, testKey(7) })
+	a.f.NoExpiry = true
+	a.callback("c1", a.login(t, "c1")).WantStatus(303)
+	got, _, err := a.p.open("app-user", "test", st.rows[[2]string{"app-user", "test"}])
+	if err != nil || got.Expiry != 0 || got.AccessToken != "access-c1" {
+		t.Errorf("open = %+v, %v; want Expiry 0", got, err)
+	}
+}
+
+func TestCallback_ReSignInKeepsTheRefreshToken(t *testing.T) {
+	st := newStubStore()
+	a := newCallbackAppWith(t, "", func(context.Context, Identity) (string, error) { return "app-user", nil },
+		func(o *Options) { o.Store, o.Key = st, testKey(7) })
+	a.callback("c1", a.login(t, "c1")).WantStatus(303)
+	a.f.NoRefreshToken = true
+	a.callback("c2", a.login(t, "c2")).WantStatus(303)
+	got, _, err := a.p.open("app-user", "test", st.rows[[2]string{"app-user", "test"}])
+	if err != nil || got.RefreshToken != "refresh-c1" || got.AccessToken != "access-c2" {
+		t.Errorf("open = %+v, %v; want refresh-c1 with access-c2", got, err)
+	}
+}
+
+func TestCallback_OfflineScopeIsRecorded(t *testing.T) {
+	pr := &provider{cfg: Provider{Offline: true}, preset: presetSpec{offlineScope: true}}
+	if got := strings.Join(requestedScopes(pr), " "); got != "openid email profile offline_access" {
+		t.Errorf("requestedScopes = %q", got)
+	}
 }
 
 func TestCallback_NoStoreSavesNothing(t *testing.T) {

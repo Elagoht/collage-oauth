@@ -55,6 +55,8 @@ type fakeProvider struct {
 	TokenStatus int
 	// Refresh answers grant_type=refresh_token. Nil: 400.
 	Refresh func(refreshToken string) (newAccess, newRefresh string, status int)
+	// NoRefreshToken and NoExpiry leave those out of the code grant's answer.
+	NoRefreshToken, NoExpiry bool
 	// UserinfoSub is the "sub" /userinfo answers. Default "u-1".
 	UserinfoSub string
 	// ClientID and ClientSecret are what /token expects. Defaults "client", "secret".
@@ -159,7 +161,7 @@ func (f *fakeProvider) discovery(w http.ResponseWriter, _ *http.Request) {
 type fakeTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token,omitempty"`
-	ExpiresIn    int    `json:"expires_in"`
+	ExpiresIn    int    `json:"expires_in,omitempty"`
 	IDToken      string `json:"id_token,omitempty"`
 	TokenType    string `json:"token_type"`
 }
@@ -219,10 +221,17 @@ func (f *fakeProvider) codeGrant(w http.ResponseWriter, form url.Values) {
 		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, fakeTokenResponse{
+	resp := fakeTokenResponse{
 		AccessToken: "access-" + code, RefreshToken: "refresh-" + code, ExpiresIn: 3600,
 		IDToken: f.idToken(nonce), TokenType: "Bearer",
-	})
+	}
+	if f.NoRefreshToken {
+		resp.RefreshToken = ""
+	}
+	if f.NoExpiry {
+		resp.ExpiresIn = 0
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (f *fakeProvider) idToken(nonce string) string {

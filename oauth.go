@@ -152,8 +152,8 @@ func resolveProvider(cfg Provider) (*provider, error) {
 	if cfg.Name == "" {
 		return nil, errors.New("oauth: a provider has no name")
 	}
-	if strings.ContainsAny(cfg.Name, "/?#") {
-		return nil, fmt.Errorf("oauth: provider name %q must be one URL segment", cfg.Name)
+	if strings.ContainsAny(cfg.Name, "/?#") || strings.IndexFunc(cfg.Name, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return nil, fmt.Errorf("oauth: provider name %q must be one URL segment without control characters", cfg.Name)
 	}
 	pr := &provider{cfg: cfg}
 	if cfg.Preset != "" {

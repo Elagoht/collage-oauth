@@ -17,7 +17,7 @@ const sealVersion = 1
 type stored struct {
 	AccessToken  string   `json:"a"`
 	RefreshToken string   `json:"r"`
-	Expiry       int64    `json:"e"` // Unix seconds
+	Expiry       int64    `json:"e"` // Unix seconds; 0 = the provider gave no lifetime, treated as valid
 	Scopes       []string `json:"s"`
 }
 
