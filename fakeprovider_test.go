@@ -9,8 +9,14 @@
 //	fp := newFakeProvider(t)            // TLS server, closed with t.Cleanup
 //	fp.ExpectCode("code-1", nonce)      // what /authorize would have recorded
 //	fp.RememberChallenge("code-1", ch)  // PKCE challenge seen on /authorize
+//	fp.ExpectRedirectURI("code-1", uri) // redirect_uri seen on /authorize
 //	cfg := Provider{Name: "fake", Issuer: fp.URL, ClientID: "client", ClientSecret: "secret"}
 //	opts.HTTPClient = fp.Client         // trusts the fake's certificate
+//
+// The fake is strict, so a client that gets a detail wrong fails here. /token
+// answers 400 invalid_grant for a code with no remembered challenge, a wrong or
+// missing code_verifier, or a redirect_uri other than the one expected for the
+// code (when one was expected). A code is single-use: it is gone after a success.
 //
 // The fake accepts Basic auth client:secret only. Knobs may be set before the
 // first request; counters and Revoked are safe to read at any time via the
@@ -25,6 +31,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -60,6 +67,7 @@ type fakeProvider struct {
 	mu         sync.Mutex
 	nonces     map[string]string // code -> nonce
 	challenges map[string]string // code -> PKCE challenge
+	redirects  map[string]string // code -> redirect_uri expected on /token
 	revoked    []string
 
 	srv *httptest.Server
@@ -69,7 +77,7 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 	t.Helper()
 	f := &fakeProvider{
 		ClientID: "client", ClientSecret: "secret",
-		nonces: map[string]string{}, challenges: map[string]string{},
+		nonces: map[string]string{}, challenges: map[string]string{}, redirects: map[string]string{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", f.discovery)
@@ -96,6 +104,14 @@ func (f *fakeProvider) RememberChallenge(code, challenge string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.challenges[code] = challenge
+}
+
+// ExpectRedirectURI records the redirect_uri sent on /authorize for code. /token
+// then rejects any other redirect_uri for it.
+func (f *fakeProvider) ExpectRedirectURI(code, uri string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.redirects[code] = uri
 }
 
 // Revoked returns the tokens /revoke has seen.
@@ -188,12 +204,18 @@ func (f *fakeProvider) codeGrant(w http.ResponseWriter, form url.Values) {
 	f.mu.Lock()
 	nonce, known := f.nonces[code]
 	challenge, hasChallenge := f.challenges[code]
-	f.mu.Unlock()
-	if !known {
-		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
-		return
+	redirect, hasRedirect := f.redirects[code]
+	valid := known && hasChallenge &&
+		pkceChallenge(form.Get("code_verifier")) == challenge &&
+		form.Get("code_verifier") != "" &&
+		(!hasRedirect || form.Get("redirect_uri") == redirect)
+	if valid { // single-use
+		delete(f.nonces, code)
+		delete(f.challenges, code)
+		delete(f.redirects, code)
 	}
-	if hasChallenge && pkceChallenge(form.Get("code_verifier")) != challenge {
+	f.mu.Unlock()
+	if !valid {
 		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
 		return
 	}
@@ -261,4 +283,49 @@ func (f *fakeProvider) revoke(w http.ResponseWriter, r *http.Request) {
 	f.revoked = append(f.revoked, r.PostForm.Get("token"))
 	f.mu.Unlock()
 	w.WriteHeader(http.StatusOK)
+}
+
+func TestFakeProvider_IsStrict(t *testing.T) {
+	fp := newFakeProvider(t)
+	post := func(code, verifier, redirect string) int {
+		form := url.Values{"grant_type": {"authorization_code"}, "code": {code}}
+		if verifier != "" {
+			form.Set("code_verifier", verifier)
+		}
+		if redirect != "" {
+			form.Set("redirect_uri", redirect)
+		}
+		req, _ := http.NewRequest(http.MethodPost, fp.URL+"/token", strings.NewReader(form.Encode()))
+		req.SetBasicAuth("client", "secret")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		res, err := fp.Client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		return res.StatusCode
+	}
+	fp.ExpectCode("no-challenge", "n")
+	if got := post("no-challenge", "v", ""); got != 400 {
+		t.Errorf("code without a challenge: %d, want 400", got)
+	}
+	fp.ExpectCode("c", "n")
+	fp.RememberChallenge("c", pkceChallenge("v"))
+	fp.ExpectRedirectURI("c", "https://x/cb")
+	for name, got := range map[string]int{
+		"wrong verifier":   post("c", "other", "https://x/cb"),
+		"missing verifier": post("c", "", "https://x/cb"),
+		"wrong redirect":   post("c", "v", "https://y/cb"),
+		"missing redirect": post("c", "v", ""),
+	} {
+		if got != 400 {
+			t.Errorf("%s: %d, want 400", name, got)
+		}
+	}
+	if got := post("c", "v", "https://x/cb"); got != 200 {
+		t.Errorf("valid exchange: %d, want 200", got)
+	}
+	if got := post("c", "v", "https://x/cb"); got != 400 {
+		t.Errorf("reused code: %d, want 400", got)
+	}
 }
