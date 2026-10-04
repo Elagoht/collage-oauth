@@ -56,11 +56,17 @@ type callbackApp struct {
 // answers "u" for every identity.
 func newCallbackApp(t *testing.T, errorPath string, onLogin LoginFunc) *callbackApp {
 	t.Helper()
+	return newCallbackAppWith(t, errorPath, onLogin, nil)
+}
+
+// newCallbackAppWith is newCallbackApp with tune adjusting the Options first.
+func newCallbackAppWith(t *testing.T, errorPath string, onLogin LoginFunc, tune func(*Options)) *callbackApp {
+	t.Helper()
 	a := &callbackApp{f: newFakeProvider(t)}
 	if onLogin == nil {
 		onLogin = func(context.Context, Identity) (string, error) { return "u", nil }
 	}
-	a.p = New(Options{
+	opts := Options{
 		Providers: []Provider{{Name: "test", Issuer: a.f.URL, ClientID: "client", ClientSecret: "secret"}},
 		ErrorPath: errorPath,
 		OnLogin: func(ctx context.Context, id Identity) (string, error) {
@@ -68,7 +74,11 @@ func newCallbackApp(t *testing.T, errorPath string, onLogin LoginFunc) *callback
 			return onLogin(ctx, id)
 		},
 		HTTPClient: a.f.Client,
-	})
+	}
+	if tune != nil {
+		tune(&opts)
+	}
+	a.p = New(opts)
 	cfg := &collage.Config{
 		DevMode: true,
 		Server:  collage.ServerConfig{Host: "localhost", Port: 3000},

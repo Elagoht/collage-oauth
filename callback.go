@@ -31,6 +31,7 @@ type tokenResponse struct {
 	IDToken      string `json:"id_token"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int64  `json:"expires_in"`
+	Scope        string `json:"scope"`
 }
 
 // callback ends a sign-in the provider sent back: it checks the pending sign-in
@@ -147,14 +148,42 @@ func (p *Plugin) callback(w http.ResponseWriter, r *http.Request, name string, p
 // If Set fails, userID is never stored. A session that belonged to another user
 // has already been cleared, so it is signed out; one of the same user, or of no
 // one, keeps what it held under its new ID.
-func (p *Plugin) signIn(_ context.Context, sess *session.Session, _, userID string, _ *tokenResponse) error {
+func (p *Plugin) signIn(ctx context.Context, sess *session.Session, name, userID string, tok *tokenResponse) error {
 	if prev := sess.Get(session.UserKey); prev != "" && prev != userID {
 		sess.Clear()
 	} else {
 		sess.Regenerate()
 	}
-	// Task 6: with a Store, seal tok and Save it here.
-	return sess.Set(session.UserKey, userID)
+	if err := sess.Set(session.UserKey, userID); err != nil {
+		return err
+	}
+	p.saveTokens(ctx, name, userID, tok)
+	return nil
+}
+
+// saveTokens seals tok and hands it to the Store. A failure is logged without
+// any token, and the sign-in still completes: the reader is signed in, only
+// Client will answer ErrNotLinked until the next sign-in.
+func (p *Plugin) saveTokens(ctx context.Context, name, userID string, tok *tokenResponse) {
+	if p.opts.Store == nil {
+		return
+	}
+	scopes := strings.Fields(tok.Scope)
+	if len(scopes) == 0 {
+		scopes = uniqueScopes(append([]string{"openid", "email", "profile"}, p.providers[name].cfg.Scopes...))
+	}
+	t := stored{AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, Scopes: scopes}
+	if tok.ExpiresIn > 0 {
+		t.Expiry = p.clock().Unix() + tok.ExpiresIn
+	}
+	blob, err := p.seal(userID, name, t)
+	if err == nil {
+		err = p.opts.Store.Save(ctx, userID, name, blob)
+	}
+	if err != nil {
+		// err is the Store's or the sealer's own; the plugin adds no token to it.
+		p.host.Logger().Error("elagoht/oauth: saving the tokens failed", "provider", name)
+	}
 }
 
 // exchange trades an authorization code for tokens at the token endpoint.
