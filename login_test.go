@@ -276,3 +276,42 @@ func TestLogin_RedirectURIOutsideDevelopment(t *testing.T) {
 		}
 	})
 }
+
+func TestLogin_LongNextIsDropped(t *testing.T) {
+	a := newLoginApp(t, true)
+	a.c.Get("/auth/test/login?next=/" + strings.Repeat("a", 2000)).WantStatus(http.StatusSeeOther)
+	if got := a.peek(t, "").Next; got != "/" {
+		t.Errorf("a 2000-byte next stored %d bytes, want AfterLogin", len(got))
+	}
+	a.c.Get("/auth/test/login?next=/" + strings.Repeat("a", 1023)).WantStatus(http.StatusSeeOther)
+	if got := a.peek(t, "").Next; len(got) != 1024 {
+		t.Errorf("a 1024-byte next stored %d bytes, want it kept", len(got))
+	}
+}
+
+func TestFail_ErrorPathKeepsItsQuery(t *testing.T) {
+	a := newLoginApp(t, true)
+	a.p.opts.ErrorPath = "/oops?x=1"
+	a.f.DiscoveryStatus = http.StatusInternalServerError
+	res := a.c.Get("/auth/test/login").WantStatus(http.StatusSeeOther)
+	if got := res.Location(); got != "/oops?error=unavailable&x=1" {
+		t.Errorf("Location = %q", got)
+	}
+}
+
+func TestLogin_OnlyGETTouchesTheSignIn(t *testing.T) {
+	a := newLoginApp(t, true)
+	a.c.Get("/auth/test/login").WantStatus(http.StatusSeeOther)
+	before := a.peek(t, "")
+	for _, method := range []string{http.MethodHead, http.MethodPost} {
+		for _, route := range []string{"login", "callback"} {
+			res := a.c.Do(a.c.Request(method, "/auth/test/"+route, nil)).WantStatus(http.StatusMethodNotAllowed)
+			if res.Header.Get("Allow") != "GET" {
+				t.Errorf("%s %s: Allow = %q", method, route, res.Header.Get("Allow"))
+			}
+		}
+	}
+	if after := a.peek(t, ""); after != before {
+		t.Errorf("pending changed: %+v -> %+v", before, after)
+	}
+}

@@ -70,10 +70,12 @@ func TestOptions_Invalid(t *testing.T) {
 		"short key hex": func(o *oauth.Options) {
 			o.KeyHex = strings.Repeat("ab", 31)
 		},
-		"bad key hex":      func(o *oauth.Options) { o.KeyHex = "zz" + strings.Repeat("ab", 31) },
-		"bad previous hex": func(o *oauth.Options) { o.KeyHex = strings.Repeat("ab", 32); o.PreviousKeysHex = []string{"zz"} },
-		"no OnLogin":       func(o *oauth.Options) { o.OnLogin = nil },
-		"prefix no slash":  func(o *oauth.Options) { o.Prefix = "auth" },
+		"bad key hex":                 func(o *oauth.Options) { o.KeyHex = "zz" + strings.Repeat("ab", 31) },
+		"bad previous hex":            func(o *oauth.Options) { o.KeyHex = strings.Repeat("ab", 32); o.PreviousKeysHex = []string{"zz"} },
+		"no OnLogin":                  func(o *oauth.Options) { o.OnLogin = nil },
+		"prefix no slash":             func(o *oauth.Options) { o.Prefix = "auth" },
+		"errorPath absolute":          func(o *oauth.Options) { o.ErrorPath = "https://evil.example/x" },
+		"errorPath protocol-relative": func(o *oauth.Options) { o.ErrorPath = "//evil.example" },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

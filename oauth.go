@@ -72,6 +72,9 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	if o.Prefix == "" {
 		return errors.New("oauth: prefix must name a path below /")
 	}
+	if o.ErrorPath != "" && collage.SafeRedirect(o.ErrorPath, "") != o.ErrorPath {
+		return errors.New("oauth: errorPath must be a path on this site, starting with a single /")
+	}
 	if o.AfterLogin == "" {
 		o.AfterLogin = "/"
 	}
@@ -182,12 +185,18 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // ServeHTTP dispatches {prefix}/{name}/login and {prefix}/{name}/callback. An
-// unknown provider or path, or a method other than GET, gets the 404 page.
+// unknown provider or path gets the 404 page, a method other than GET the 405 page.
 func (p *Plugin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	name, route, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, p.opts.Prefix+"/"), "/")
 	pr := p.providers[name]
-	if !ok || pr == nil || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+	if !ok || pr == nil || (route != "login" && route != "callback") {
 		p.host.ServeStatus(w, r, http.StatusNotFound)
+		return
+	}
+	// GET only: a HEAD (a link preview) must not mint or spend a pending sign-in.
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		p.host.ServeStatus(w, r, http.StatusMethodNotAllowed)
 		return
 	}
 	switch route {

@@ -25,6 +25,9 @@ type pending struct {
 	Created  int64  `json:"c"`
 }
 
+// maxNext is the longest next a sign-in keeps; a longer one is as good as none.
+const maxNext = 1024
+
 func pendingKey(name string) string { return "oauth:" + name }
 
 // pendingFor reads the pending sign-in for the provider name from the request's
@@ -78,8 +81,13 @@ func (p *Plugin) redirectURI(r *http.Request, name string) string {
 // ErrorPath is set, else to the built-in status page.
 func (p *Plugin) fail(w http.ResponseWriter, r *http.Request, code string, status int) {
 	if p.opts.ErrorPath != "" {
-		http.Redirect(w, r, p.opts.ErrorPath+"?error="+url.QueryEscape(code), http.StatusSeeOther)
-		return
+		if u, err := url.Parse(p.opts.ErrorPath); err == nil {
+			q := u.Query()
+			q.Set("error", code)
+			u.RawQuery = q.Encode()
+			http.Redirect(w, r, u.String(), http.StatusSeeOther)
+			return
+		}
 	}
 	p.host.ServeStatus(w, r, status)
 }
@@ -112,8 +120,14 @@ func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *
 		return
 	}
 
+	// The pending sign-in lives in the session cookie, so a long next (anyone can
+	// send a reader to a login link) must not grow it.
+	next := r.URL.Query().Get("next")
+	if len(next) > maxNext {
+		next = ""
+	}
 	pd := pending{
-		Next:    collage.SafeRedirect(r.URL.Query().Get("next"), p.opts.AfterLogin),
+		Next:    collage.SafeRedirect(next, p.opts.AfterLogin),
 		Created: time.Now().Unix(),
 	}
 	for _, dst := range []*string{&pd.State, &pd.Nonce, &pd.Verifier} {
