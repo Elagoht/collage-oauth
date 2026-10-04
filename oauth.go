@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Elagoht/collage/pkg/collage"
@@ -31,6 +32,9 @@ type Plugin struct {
 	providers map[string]*provider
 	keys      [][]byte // Key first, then PreviousKeys
 	host      collage.Host
+
+	discMu sync.Mutex
+	disc   map[string]cachedMeta // discovery documents by provider name
 }
 
 // New returns the plugin.
