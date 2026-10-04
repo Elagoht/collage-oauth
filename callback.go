@@ -183,6 +183,17 @@ func (p *Plugin) saveTokens(ctx context.Context, name, userID string, tok *token
 	if tok.ExpiresIn > 0 {
 		t.Expiry = p.clock().Unix() + tok.ExpiresIn
 	}
+	// A refresh in flight for this user saves before this sign-in does, never
+	// after it, and its waiters ask again for these tokens; meanwhile no refresh
+	// starts. Client's cache is dropped, so the earlier tokens are not handed out.
+	// The wait comes first, so a rotation by that refresh is the one kept below.
+	k := tokenKey{userID, name}
+	c := p.tok.acquire(k, false)
+	defer p.tok.release(k, false)
+	if waitFor(ctx, c) != nil {
+		// Bounded by saveTimeout; the refresh is bounded too, so this is rare.
+		p.host.Logger().Warn("elagoht/oauth: a refresh in flight outlasted the sign-in's wait", "provider", name, "user", userID)
+	}
 	if t.RefreshToken == "" {
 		// A sign-in that returns no refresh token keeps the one already stored.
 		if old, err := p.opts.Store.Load(ctx, userID, name); err == nil && len(old) > 0 {
@@ -197,10 +208,6 @@ func (p *Plugin) saveTokens(ctx context.Context, name, userID string, tok *token
 		stage = "saving"
 		err = p.opts.Store.Save(ctx, userID, name, blob)
 	}
-	// Client's cache must not keep handing out the tokens of the earlier sign-in.
-	p.tok.mu.Lock()
-	p.tok.drop(tokenKey{userID, name})
-	p.tok.mu.Unlock()
 	if err != nil {
 		// Never err's text: a store's error may quote what it was given.
 		p.host.Logger().Error("elagoht/oauth: keeping the tokens failed; the sign-in stands",

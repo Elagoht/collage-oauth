@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,10 +29,25 @@ type tokenKey struct{ user, provider string }
 // call is one load-and-refresh of a key, shared by every caller that asks for
 // the key while it runs. token and err are written before done is closed.
 type call struct {
-	done    chan struct{}
-	token   string
-	err     error
-	revoked bool // set by Revoke under tokenState.mu: the result is not kept
+	done  chan struct{}
+	token string
+	err   error
+	retry bool // the call was superseded by a sign-in: its waiters ask again
+
+	// Set under tokenState.mu by a hold (see hold): the result is not kept.
+	revoked    bool // by Revoke: the waiters get ErrNotLinked
+	superseded bool // by a sign-in: the waiters ask again once it is saved
+}
+
+// hold keeps a key still while Revoke or a sign-in rewrites its row. While a
+// hold exists no call starts for the key: token answers ErrNotLinked during a
+// Revoke and waits for the hold to end during a sign-in. The call in flight when
+// the first hold began is kept in c, so every holder, a later one too, waits for
+// it before touching the row: whatever it saves lands first.
+type hold struct {
+	revokes, signIns int
+	c                *call         // the call in flight when the hold began, or nil
+	free             chan struct{} // closed when the last holder lets go
 }
 
 type cacheEntry struct {
@@ -50,11 +66,75 @@ type tokenState struct {
 
 	// calls are the loads-and-refreshes in flight, one per key.
 	calls map[tokenKey]*call
-	// revoking counts the Revokes running for a key. While it is above zero no
-	// call starts for the key, so nothing loads the row Revoke is deleting. An
-	// entry is removed when its count reaches zero, so the map stays as small as
-	// the number of Revokes running.
-	revoking map[tokenKey]int
+	// holds are the Revokes and sign-ins running, one hold per key. A hold is
+	// removed when its last holder lets go, so the map stays as small as the
+	// number of them running.
+	holds map[tokenKey]*hold
+}
+
+// acquire takes a hold on k for a Revoke (revoke) or a sign-in, drops k's cached
+// token, and marks the call in flight. It returns the call to wait for, or nil.
+func (s *tokenState) acquire(k tokenKey, revoke bool) *call {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.drop(k)
+	h := s.holds[k]
+	if h == nil {
+		h = &hold{free: make(chan struct{})}
+		if s.holds == nil {
+			s.holds = map[tokenKey]*hold{}
+		}
+		s.holds[k] = h
+	}
+	if c := s.calls[k]; c != nil {
+		delete(s.calls, k)
+		h.c = c
+	}
+	if revoke {
+		h.revokes++
+		if h.c != nil {
+			h.c.revoked = true
+		}
+	} else {
+		h.signIns++
+		if h.c != nil {
+			h.c.superseded = true
+		}
+	}
+	return h.c
+}
+
+// release lets go of a hold taken by acquire, and drops k's cached token again.
+func (s *tokenState) release(k tokenKey, revoke bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.drop(k)
+	h := s.holds[k]
+	if h == nil {
+		return
+	}
+	if revoke {
+		h.revokes--
+	} else {
+		h.signIns--
+	}
+	if h.revokes <= 0 && h.signIns <= 0 {
+		delete(s.holds, k)
+		close(h.free)
+	}
+}
+
+// waitFor waits for c, when there is one, or for ctx.
+func waitFor(ctx context.Context, c *call) error {
+	if c == nil {
+		return nil
+	}
+	select {
+	case <-c.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // get returns the cached token of k. The caller holds mu.
@@ -136,18 +216,89 @@ type bearer struct {
 	base             http.RoundTripper
 }
 
+// errInsecureHost is the refusal to send a token in clear text.
+var errInsecureHost = errors.New("oauth: Client refuses to send a token over plain http to a host other than loopback")
+
 // RoundTrip sends a clone of req carrying the current access token.
+//
+// The token goes only where the first request went. On a redirect hop
+// (req.Response is set), it is attached only when the hop's host is the first
+// request's host or a subdomain of it, as net/http decides for the headers it
+// copies itself, and the hop is not a downgrade from https. Any other hop is
+// still followed, without the token. Plain http carries the token only to a
+// loopback host; a first request elsewhere over http fails with errInsecureHost.
 func (b *bearer) RoundTrip(req *http.Request) (*http.Response, error) {
+	first := req
+	for first.Response != nil && first.Response.Request != nil {
+		first = first.Response.Request
+	}
+	attach := clearTextOK(req.URL)
+	if first == req {
+		if !attach {
+			closeBody(req)
+			return nil, errInsecureHost
+		}
+	} else {
+		attach = attach && isDomainOrSubdomain(asciiLower(req.URL.Hostname()), asciiLower(first.URL.Hostname())) &&
+			!(asciiLower(first.URL.Scheme) == "https" && asciiLower(req.URL.Scheme) != "https")
+	}
+	if !attach {
+		return b.base.RoundTrip(req)
+	}
 	tok, err := b.p.token(req.Context(), b.userID, b.provider)
 	if err != nil {
-		if req.Body != nil {
-			_ = req.Body.Close()
-		}
+		closeBody(req)
 		return nil, err
 	}
 	r := req.Clone(req.Context())
 	r.Header.Set("Authorization", "Bearer "+tok)
 	return b.base.RoundTrip(r)
+}
+
+func closeBody(req *http.Request) {
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+}
+
+// clearTextOK reports whether u may carry a token: https, or http to loopback.
+func clearTextOK(u *url.URL) bool {
+	switch asciiLower(u.Scheme) {
+	case "https":
+		return true
+	case "http":
+		h := asciiLower(u.Hostname())
+		if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+			return true
+		}
+		ip := net.ParseIP(h)
+		return ip != nil && ip.IsLoopback()
+	}
+	return false
+}
+
+// isDomainOrSubdomain reports whether sub is parent or a subdomain of it, as
+// net/http's rule for copying sensitive headers on a redirect. An IPv6 address
+// matches only itself.
+func isDomainOrSubdomain(sub, parent string) bool {
+	if sub == parent {
+		return true
+	}
+	if strings.ContainsAny(sub, ":%") {
+		return false
+	}
+	return strings.HasSuffix(sub, parent) && sub[len(sub)-len(parent)-1] == '.'
+}
+
+// asciiLower folds ASCII letters only.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // token returns a valid access token for the user at the provider: from the
@@ -162,22 +313,42 @@ func (p *Plugin) token(ctx context.Context, userID, name string) (string, error)
 		return "", fmt.Errorf("oauth: unknown provider %q: %w", name, ErrNotLinked)
 	}
 	k := tokenKey{userID, name}
+	for {
+		tok, again, err := p.tokenOnce(ctx, k, pr)
+		if !again {
+			return tok, err
+		}
+	}
+}
+
+// tokenOnce is one try of token. again asks for another: a sign-in was rewriting
+// the row, and the try waited for it.
+func (p *Plugin) tokenOnce(ctx context.Context, k tokenKey, pr *provider) (tok string, again bool, err error) {
 	now := p.clock().Unix()
 	s := &p.tok
 	s.mu.Lock()
-	if s.revoking[k] > 0 {
+	if h := s.holds[k]; h != nil {
+		revoking, free := h.revokes > 0, h.free
 		s.mu.Unlock()
-		return "", ErrNotLinked
+		if revoking {
+			return "", false, ErrNotLinked
+		}
+		select {
+		case <-free:
+			return "", true, nil
+		case <-ctx.Done():
+			return "", false, ctx.Err()
+		}
 	}
 	if t, ok := s.get(k); ok {
 		switch {
 		case !needsRefresh(t, now):
 			s.mu.Unlock()
-			return t.AccessToken, nil
+			return t.AccessToken, false, nil
 		case t.RefreshToken == "" && !expired(t, now):
 			// Nothing to refresh with; it still works for a few seconds.
 			s.mu.Unlock()
-			return t.AccessToken, nil
+			return t.AccessToken, false, nil
 		}
 	}
 	c := s.calls[k]
@@ -192,9 +363,9 @@ func (p *Plugin) token(ctx context.Context, userID, name string) (string, error)
 	s.mu.Unlock()
 	select {
 	case <-c.done:
-		return c.token, c.err
+		return c.token, c.retry, c.err
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return "", false, ctx.Err()
 	}
 }
 
@@ -204,7 +375,7 @@ func (p *Plugin) token(ctx context.Context, userID, name string) (string, error)
 func (p *Plugin) fetch(ctx context.Context, k tokenKey, pr *provider, c *call) {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
-	t, keep, err := p.load(ctx, k, pr)
+	t, keep, err := p.load(ctx, k, pr, c)
 
 	s := &p.tok
 	s.mu.Lock()
@@ -216,6 +387,9 @@ func (p *Plugin) fetch(ctx context.Context, k tokenKey, pr *provider, c *call) {
 		// Revoke started meanwhile: whatever this call saved, Revoke loads and
 		// deletes after it, and nothing goes back in the cache.
 		c.token, c.err = "", ErrNotLinked
+	case c.superseded:
+		// A sign-in saves after this call; the waiters ask again for its tokens.
+		c.retry = true
 	case err != nil:
 		s.drop(k)
 		c.err = err
@@ -234,7 +408,7 @@ func (p *Plugin) fetch(ctx context.Context, k tokenKey, pr *provider, c *call) {
 // load reads k's row, refreshes it when it is near expiry, and saves it again
 // when it changed or was sealed with a previous key. keep reports whether the
 // result may be cached.
-func (p *Plugin) load(ctx context.Context, k tokenKey, pr *provider) (t stored, keep bool, err error) {
+func (p *Plugin) load(ctx context.Context, k tokenKey, pr *provider, c *call) (t stored, keep bool, err error) {
 	store := p.opts.Store
 	blob, err := store.Load(ctx, k.user, k.provider)
 	if err != nil {
@@ -256,8 +430,16 @@ func (p *Plugin) load(ctx context.Context, k tokenKey, pr *provider) (t stored, 
 		case err == nil:
 			t, dirty = nt, true
 		case errors.As(err, &te) && te.status == http.StatusBadRequest && te.code == "invalid_grant":
-			// The grant is gone at the provider: so is the row.
-			_ = store.Delete(ctx, k.user, k.provider)
+			// The grant is gone at the provider: so is the row, unless a hold
+			// began meanwhile. A sign-in's row is newer than this grant, and a
+			// Revoke deletes it anyway. The holder waits for this call, so the
+			// check cannot go stale before the Delete lands.
+			p.tok.mu.Lock()
+			held := c.revoked || c.superseded
+			p.tok.mu.Unlock()
+			if !held {
+				_ = store.Delete(ctx, k.user, k.provider)
+			}
 			return stored{}, false, ErrNotLinked
 		case !expired(t, now):
 			// An outage, but the token still works for a few seconds.
@@ -334,34 +516,10 @@ func (p *Plugin) Revoke(ctx context.Context, userID, name string) error {
 		return fmt.Errorf("oauth: unknown provider %q: %w", name, ErrNotLinked)
 	}
 	k := tokenKey{userID, name}
-	s := &p.tok
-	s.mu.Lock()
-	s.drop(k)
-	if s.revoking == nil {
-		s.revoking = map[tokenKey]int{}
-	}
-	s.revoking[k]++
-	c := s.calls[k]
-	if c != nil {
-		c.revoked = true
-		delete(s.calls, k)
-	}
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		if s.revoking[k]--; s.revoking[k] <= 0 {
-			delete(s.revoking, k)
-		}
-		s.drop(k)
-		s.mu.Unlock()
-	}()
-
-	if c != nil {
-		select {
-		case <-c.done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	c := p.tok.acquire(k, true)
+	defer p.tok.release(k, true)
+	if err := waitFor(ctx, c); err != nil {
+		return err
 	}
 	blob, err := store.Load(ctx, userID, name)
 	if err != nil {

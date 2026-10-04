@@ -108,6 +108,7 @@ type stubStore struct {
 	mu      sync.Mutex
 	rows    map[[2]string][]byte
 	saveErr error
+	deleted int
 }
 
 func newStubStore() *stubStore { return &stubStore{rows: map[[2]string][]byte{}} }
@@ -131,8 +132,16 @@ func (s *stubStore) Save(_ context.Context, u, p string, b []byte) error {
 func (s *stubStore) Delete(_ context.Context, u, p string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.deleted++
 	delete(s.rows, [2]string{u, p})
 	return nil
+}
+
+// deletes counts the calls to Delete.
+func (s *stubStore) deletes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleted
 }
 
 // row returns the blob for (u, p), nil when there is none.

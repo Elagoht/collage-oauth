@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"slices"
 	"sync"
 	"testing"
@@ -312,12 +314,7 @@ func TestRevoke_DropsTheCache(t *testing.T) {
 	t.Run("an in-flight refresh does not write back", func(t *testing.T) {
 		ctx := context.Background()
 		a, st := newClientApp(t, nil)
-		entered, release := make(chan struct{}), make(chan struct{})
-		a.f.Refresh = func(string) (string, string, int) {
-			close(entered)
-			<-release
-			return "new-a", "new-r", 200
-		}
+		entered, release := blockRefresh(t, a, 200)
 		put(t, a, st, "app-user", stored{AccessToken: "old-a", RefreshToken: "old-r", Expiry: a.p.clock().Unix() - 10})
 
 		clientErr := make(chan error, 1)
@@ -331,7 +328,7 @@ func TestRevoke_DropsTheCache(t *testing.T) {
 		key := tokenKey{"app-user", "test"}
 		for deadline := time.Now().Add(5 * time.Second); ; {
 			a.p.tok.mu.Lock()
-			marked := a.p.tok.revoking[key] > 0
+			marked := a.p.tok.holds[key] != nil && a.p.tok.holds[key].revokes > 0
 			a.p.tok.mu.Unlock()
 			if marked {
 				break
@@ -343,7 +340,7 @@ func TestRevoke_DropsTheCache(t *testing.T) {
 		}
 		// A Client asked while Revoke runs gets nothing either.
 		wantNotLinked(t, a, "app-user")
-		close(release)
+		release()
 
 		if err := <-clientErr; !errors.Is(err, ErrNotLinked) {
 			t.Errorf("the in-flight Client = %v, want ErrNotLinked", err)
@@ -354,15 +351,15 @@ func TestRevoke_DropsTheCache(t *testing.T) {
 		if st.row("app-user", "test") != nil {
 			t.Error("the in-flight refresh wrote the row back")
 		}
-		if got := a.f.Revoked(); !slices.Equal(got, []string{"new-r"}) {
+		if got := a.f.Revoked(); !slices.Equal(got, []string{"refreshed-r"}) {
 			t.Errorf("revoked %v, want the rotated refresh token", got)
 		}
 		wantNotLinked(t, a, "app-user")
 		a.p.tok.mu.Lock()
 		defer a.p.tok.mu.Unlock()
-		if len(a.p.tok.entries) != 0 || len(a.p.tok.calls) != 0 || len(a.p.tok.revoking) != 0 {
-			t.Errorf("state left behind: %d cached, %d calls, %d revoking",
-				len(a.p.tok.entries), len(a.p.tok.calls), len(a.p.tok.revoking))
+		if len(a.p.tok.entries) != 0 || len(a.p.tok.calls) != 0 || len(a.p.tok.holds) != 0 {
+			t.Errorf("state left behind: %d cached, %d calls, %d holds",
+				len(a.p.tok.entries), len(a.p.tok.calls), len(a.p.tok.holds))
 		}
 	})
 }
@@ -406,3 +403,235 @@ type closeSpy struct{ closed bool }
 
 func (c *closeSpy) Read([]byte) (int, error) { return 0, io.EOF }
 func (c *closeSpy) Close() error             { c.closed = true; return nil }
+
+// waitHold polls until k's hold has at least revokes Revokes and signIns sign-ins.
+func waitHold(t *testing.T, p *Plugin, k tokenKey, revokes, signIns int) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		p.tok.mu.Lock()
+		h := p.tok.holds[k]
+		ok := h != nil && h.revokes >= revokes && h.signIns >= signIns
+		p.tok.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no hold with %d revokes, %d sign-ins on %v", revokes, signIns, k)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// blockRefresh makes the fake's refresh wait until release is called, answering
+// with status; entered is closed when it starts. A failing test releases it at
+// cleanup, so it never hangs.
+func blockRefresh(t *testing.T, a *callbackApp, status int) (entered chan struct{}, release func()) {
+	entered = make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	a.f.Refresh = func(string) (string, string, int) {
+		close(entered)
+		<-gate
+		return "refreshed-a", "refreshed-r", status
+	}
+	return entered, release
+}
+
+// A refresh in flight when the user signs in again must not overwrite the new
+// sign-in's row, nor delete it on invalid_grant.
+func TestSignIn_SupersedesARefreshInFlight(t *testing.T) {
+	for name, status := range map[string]int{"refresh succeeds": 200, "refresh invalid_grant": 400} {
+		t.Run(name, func(t *testing.T) {
+			a, st := newClientApp(t, nil)
+			entered, release := blockRefresh(t, a, status)
+			put(t, a, st, "app-user", stored{AccessToken: "old-a", RefreshToken: "old-r", Expiry: a.p.clock().Unix() - 10})
+
+			type result struct {
+				auth string
+				err  error
+			}
+			clientRes := make(chan result, 1)
+			go func() {
+				c, err := a.p.Client(context.Background(), "app-user", "test")
+				if err != nil {
+					clientRes <- result{err: err}
+					return
+				}
+				got, err := callAPI(c, a.f.URL)
+				clientRes <- result{got, err}
+			}()
+			<-entered
+			state := a.login(t, "c2")
+			signedIn := make(chan int, 1)
+			go func() { signedIn <- a.callback("c2", state).Status }()
+			// Release the refresh once the sign-in is saving: it holds the key,
+			// or, were it not to wait, it has already finished.
+			status := 0
+			for deadline := time.Now().Add(5 * time.Second); status == 0; time.Sleep(time.Millisecond) {
+				select {
+				case status = <-signedIn:
+				default:
+				}
+				a.p.tok.mu.Lock()
+				held := a.p.tok.holds[tokenKey{"app-user", "test"}] != nil
+				a.p.tok.mu.Unlock()
+				if held || time.Now().After(deadline) {
+					break
+				}
+			}
+			release()
+			if status == 0 {
+				status = <-signedIn
+			}
+			if status != http.StatusSeeOther {
+				t.Fatalf("sign-in status %d", status)
+			}
+			if n := st.deletes(); n != 0 {
+				t.Errorf("the superseded refresh deleted the row %d times", n)
+			}
+			if got := opened(t, a, st, "app-user"); got.AccessToken != "access-c2" || got.RefreshToken != "refresh-c2" {
+				t.Errorf("stored = %+v; want the second sign-in's tokens", got)
+			}
+			// The waiters of the superseded refresh ask again and get the sign-in's token.
+			if r := <-clientRes; r.err != nil || r.auth != "Bearer access-c2" {
+				t.Errorf("the in-flight Client = %q, %v; want Bearer access-c2", r.auth, r.err)
+			}
+			wantAPI(t, a, "app-user", "Bearer access-c2")
+		})
+	}
+}
+
+// A second Revoke waits for the refresh in flight just as the first does.
+func TestRevoke_TwoRevokesBothWait(t *testing.T) {
+	ctx := context.Background()
+	a, st := newClientApp(t, nil)
+	entered, release := blockRefresh(t, a, 200)
+	put(t, a, st, "app-user", stored{AccessToken: "old-a", RefreshToken: "old-r", Expiry: a.p.clock().Unix() - 10})
+	go func() { _, _ = a.p.Client(ctx, "app-user", "test") }()
+	<-entered
+	k := tokenKey{"app-user", "test"}
+	errs := make(chan error, 2)
+	go func() { errs <- a.p.Revoke(ctx, "app-user", "test") }()
+	waitHold(t, a.p, k, 1, 0)
+	go func() { errs <- a.p.Revoke(ctx, "app-user", "test") }()
+	waitHold(t, a.p, k, 2, 0)
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case err := <-errs:
+		t.Fatalf("a Revoke returned (%v) while the refresh was still in flight", err)
+	default:
+	}
+	release()
+	// Both may find the row (and both revoke it) or the later one may find none.
+	for range 2 {
+		if err := <-errs; err != nil && !errors.Is(err, ErrNotLinked) {
+			t.Errorf("Revoke = %v", err)
+		}
+	}
+	if st.row("app-user", "test") != nil {
+		t.Error("the refresh wrote the row back after the Revokes")
+	}
+	// Each revoked the rotated token: neither went ahead with the old row.
+	got := a.f.Revoked()
+	if len(got) == 0 || slices.ContainsFunc(got, func(s string) bool { return s != "refreshed-r" }) {
+		t.Errorf("revoked %v, want only the rotated refresh token", got)
+	}
+}
+
+func TestBearer_TokenStaysWithItsHost(t *testing.T) {
+	a, _ := newClientApp(t, nil)
+	a.callback("c1", a.login(t, "c1")).WantStatus(303)
+	c, err := a.p.Client(context.Background(), "app-user", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	seenByOther := "unset"
+	other := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenByOther = r.Header.Get("Authorization")
+		mu.Unlock()
+	}))
+	t.Cleanup(other.Close)
+	otherURL, _ := url.Parse(other.URL)
+	sawOther := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		s := seenByOther
+		seenByOther = "unset"
+		return s
+	}
+
+	t.Run("same host keeps it", func(t *testing.T) {
+		if got, err := callAPI(c, a.f.URL+"/redirect?to=/api&x="); err != nil || got != "Bearer access-c1" {
+			t.Errorf("after a same-host redirect: %q, %v", got, err)
+		}
+	})
+	t.Run("another host gets none", func(t *testing.T) {
+		// A loopback http API at 127.0.0.1 redirecting to localhost: the first
+		// hop carries the token, the second does not.
+		first := make(chan string, 1)
+		api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			first <- r.Header.Get("Authorization")
+			http.Redirect(w, r, "http://localhost:"+otherURL.Port()+"/", http.StatusFound)
+		}))
+		t.Cleanup(api.Close)
+		res, err := c.Get(api.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if got := <-first; got != "Bearer access-c1" {
+			t.Errorf("the first host got %q", got)
+		}
+		if got := sawOther(); got != "" {
+			t.Errorf("the redirect's host got %q", got)
+		}
+	})
+	t.Run("https to http gets none", func(t *testing.T) {
+		// Same hostname (127.0.0.1), downgraded.
+		res, err := c.Get(a.f.URL + "/redirect?to=" + url.QueryEscape(other.URL+"/"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if got := sawOther(); got != "" {
+			t.Errorf("the downgraded hop got %q", got)
+		}
+	})
+	t.Run("plain http elsewhere is refused", func(t *testing.T) {
+		if _, err := c.Get("http://example.invalid/api"); !errors.Is(err, errInsecureHost) {
+			t.Errorf("Get = %v, want errInsecureHost", err)
+		}
+	})
+}
+
+func TestBearer_HostRules(t *testing.T) {
+	for _, tc := range []struct {
+		sub, parent string
+		want        bool
+	}{
+		{"api.example.com", "api.example.com", true},
+		{"eu.api.example.com", "api.example.com", true},
+		{"evilapi.example.com", "api.example.com", false},
+		{"example.com", "api.example.com", false},
+		{"::1", "::1", true},
+		{"a::1", "::1", false},
+	} {
+		if got := isDomainOrSubdomain(tc.sub, tc.parent); got != tc.want {
+			t.Errorf("isDomainOrSubdomain(%q, %q) = %v", tc.sub, tc.parent, got)
+		}
+	}
+	for raw, want := range map[string]bool{
+		"https://api.example.com/": true, "HTTPS://x/": true,
+		"http://127.0.0.1:8080/": true, "http://[::1]/": true, "http://LOCALHOST/": true, "http://a.localhost/": true,
+		"http://api.example.com/": false, "http://10.0.0.1/": false, "ftp://x/": false,
+	} {
+		u, _ := url.Parse(raw)
+		if got := clearTextOK(u); got != want {
+			t.Errorf("clearTextOK(%s) = %v", raw, got)
+		}
+	}
+}

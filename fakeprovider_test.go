@@ -86,6 +86,10 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 	mux.HandleFunc("/token", f.token)
 	mux.HandleFunc("/userinfo", f.userinfo)
 	mux.HandleFunc("/revoke", f.revoke)
+	// /redirect sends the client on to its "to" parameter, for Client's tests.
+	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Query().Get("to"), http.StatusFound)
+	})
 	// /api stands for the provider's API: it echoes the Authorization it got.
 	mux.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(r.Header.Get("Authorization")))
