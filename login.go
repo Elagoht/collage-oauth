@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/Elagoht/collage/pkg/collage"
 
@@ -128,7 +127,7 @@ func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *
 	}
 	pd := pending{
 		Next:    collage.SafeRedirect(next, p.opts.AfterLogin),
-		Created: time.Now().Unix(),
+		Created: p.clock().Unix(),
 	}
 	for _, dst := range []*string{&pd.State, &pd.Nonce, &pd.Verifier} {
 		if *dst, err = randomString(); err != nil {

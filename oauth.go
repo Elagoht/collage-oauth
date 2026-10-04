@@ -35,6 +35,16 @@ type Plugin struct {
 
 	discMu sync.Mutex
 	disc   map[string]cachedMeta // discovery documents by provider name
+
+	now func() time.Time // the clock; nil is time.Now. Tests set it.
+}
+
+// clock is the time now, by the plugin's clock.
+func (p *Plugin) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
 }
 
 // New returns the plugin.
