@@ -181,7 +181,21 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 // Shutdown does nothing yet.
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
-// ServeHTTP answers 404 until the login routes exist.
-func (p *Plugin) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "not found", http.StatusNotFound)
+// ServeHTTP dispatches {prefix}/{name}/login and {prefix}/{name}/callback. An
+// unknown provider or path, or a method other than GET, gets the 404 page.
+func (p *Plugin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	name, route, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, p.opts.Prefix+"/"), "/")
+	pr := p.providers[name]
+	if !ok || pr == nil || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		p.host.ServeStatus(w, r, http.StatusNotFound)
+		return
+	}
+	switch route {
+	case "login":
+		p.login(w, r, name, pr)
+	case "callback":
+		p.callback(w, r, name, pr)
+	default:
+		p.host.ServeStatus(w, r, http.StatusNotFound)
+	}
 }
