@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -144,9 +145,20 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 		p.providers[cfg.Name] = pr
 	}
 
-	// Task 8 gives it a body; registering now reserves the name.
-	return host.AddRenderFunc("oauthLogin", func(_ *collage.RenderContext) any { // any: html/template.FuncMap's own value type
-		return func(_ ...string) string { return "" }
+	return host.AddRenderFunc("oauthLogin", func(rc *collage.RenderContext) any { // any: html/template.FuncMap's own value type
+		return func(name string, next ...string) (string, error) {
+			if p.providers[name] == nil {
+				return "", fmt.Errorf("oauthLogin: unknown provider %q", name)
+			}
+			to := p.opts.AfterLogin
+			if rc != nil && rc.Request != nil {
+				to = rc.Request.URL.RequestURI()
+			}
+			if len(next) > 0 {
+				to = next[0]
+			}
+			return p.opts.Prefix + "/" + name + "/login?next=" + url.QueryEscape(to), nil
+		}
 	})
 }
 

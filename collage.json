@@ -1,0 +1,77 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/oauth",
+  "description": "Package oauth signs a reader in with an OpenID Connect provider through elagoht/session, and keeps the provider's API tokens sealed and refreshed.",
+  "repository": "https://github.com/Elagoht/collage-oauth",
+  "config": {
+    "type": "object",
+    "description": "Package oauth signs a reader in with an OpenID Connect provider through elagoht/session, and keeps the provider's API tokens sealed and refreshed.",
+    "properties": {
+      "afterLogin": {
+        "type": "string",
+        "description": "AfterLogin is where a sign-in without a next ends. Default \"/\"."
+      },
+      "errorPath": {
+        "type": "string",
+        "description": "ErrorPath is a page given ?error=\u003ccode\u003e when a sign-in fails. Empty means the built-in status pages."
+      },
+      "key": {
+        "type": "string",
+        "description": "KeyHex is Key, hex-encoded, as configuration carries it. When both are set, KeyHex wins."
+      },
+      "prefix": {
+        "type": "string",
+        "description": "Prefix is where the login routes live: {prefix}/{provider}/login and {prefix}/{provider}/callback. It starts with \"/\". Default \"/auth\"."
+      },
+      "previousKeys": {
+        "type": "array",
+        "description": "PreviousKeysHex is PreviousKeys, hex-encoded, as configuration carries it.",
+        "items": {
+          "type": "string"
+        }
+      },
+      "providers": {
+        "type": "array",
+        "description": "Providers are the identity providers a reader may sign in with. At least one.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "clientID": {
+              "type": "string",
+              "description": "ClientID is the application's ID at the provider. Required."
+            },
+            "clientSecretEnv": {
+              "type": "string",
+              "description": "ClientSecretEnv names the environment variable that holds the client secret."
+            },
+            "issuer": {
+              "type": "string",
+              "description": "Issuer is the OpenID Connect issuer, when there is no Preset."
+            },
+            "name": {
+              "type": "string",
+              "description": "Name is the URL segment: {prefix}/{name}/login. Unique."
+            },
+            "offline": {
+              "type": "boolean",
+              "description": "Offline asks the provider for a refresh token."
+            },
+            "preset": {
+              "type": "string",
+              "description": "Preset fills the issuer and the provider's own parameters: \"google\", \"microsoft\" or \"gitlab\"."
+            },
+            "scopes": {
+              "type": "array",
+              "description": "Scopes are asked for besides \"openid email profile\".",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "additionalProperties": false
+  }
+}
