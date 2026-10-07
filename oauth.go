@@ -57,7 +57,7 @@ func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 func (p *Plugin) Name() string { return Name }
 
 // Version returns the plugin's version.
-func (p *Plugin) Version() string { return "0.1.0" }
+func (p *Plugin) Version() string { return "0.1.1" }
 
 var errBadHex = errors.New("oauth: key is not valid hex")
 
@@ -71,9 +71,11 @@ func decodeKey(s string) ([]byte, error) {
 
 // Configure reads the configuration, checks it, and reserves {{oauthLogin}}.
 func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
-	if err := host.Config(&p.opts); err != nil {
+	opts, err := collage.PluginConfig(host, p.opts)
+	if err != nil {
 		return err
 	}
+	p.opts = opts
 	o := &p.opts
 	if o.Prefix == "" {
 		o.Prefix = "/auth"

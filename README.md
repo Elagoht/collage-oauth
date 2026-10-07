@@ -36,9 +36,9 @@ app, err := collage.New(&collage.Config{
 <a href="{{oauthLogin "google"}}">Sign in with Google</a>
 ```
 
-Requires collage v0.44.0 or later (for `collage.SafeRedirect`) and collage-session
-v0.2.1 or later. Register elagoht/session too: without it the login routes answer
-`500` and log which plugin is missing.
+Requires collage v0.50.0 or later and collage-session v0.2.3 or later. Register
+elagoht/session too: without it the login routes answer `500` and log which
+plugin is missing.
 
 ## How a sign-in goes
 
