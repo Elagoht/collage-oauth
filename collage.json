@@ -3,6 +3,14 @@
   "name": "elagoht/oauth",
   "description": "Package oauth signs a reader in with an OpenID Connect provider through elagoht/session, and keeps the provider's API tokens sealed and refreshed.",
   "repository": "https://github.com/Elagoht/collage-oauth",
+  "templateFunctions": [
+    {
+      "name": "oauthLogin",
+      "signature": "oauthLogin \"provider\" [\"next\"]",
+      "insert": "oauthLogin \"${1:google}\"",
+      "doc": "The path that signs the reader in with `provider`, sending them back to the current page, or to `next` when given: a path on this site, checked with `collage.SafeRedirect`."
+    }
+  ],
   "config": {
     "type": "object",
     "description": "Package oauth signs a reader in with an OpenID Connect provider through elagoht/session, and keeps the provider's API tokens sealed and refreshed.",
@@ -46,7 +54,7 @@
             },
             "issuer": {
               "type": "string",
-              "description": "Issuer is the OpenID Connect issuer, when there is no Preset."
+              "description": "Issuer is the OpenID Connect issuer. With a Preset it replaces the preset's issuer (one Microsoft tenant) and must then be matched exactly. https, or http only to localhost or a loopback IP."
             },
             "name": {
               "type": "string",
@@ -54,7 +62,7 @@
             },
             "offline": {
               "type": "boolean",
-              "description": "Offline asks the provider for a refresh token."
+              "description": "Offline asks the provider for a refresh token: the preset's way, or the offline_access scope when there is no preset."
             },
             "preset": {
               "type": "string",

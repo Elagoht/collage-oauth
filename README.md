@@ -36,7 +36,7 @@ app, err := collage.New(&collage.Config{
 <a href="{{oauthLogin "google"}}">Sign in with Google</a>
 ```
 
-Requires collage v0.50.0 or later and collage-session v0.2.3 or later. Register
+Requires collage v0.58.0 or later and collage-session v0.2.3 or later. Register
 elagoht/session too: without it the login routes answer `500` and log which
 plugin is missing.
 
@@ -287,3 +287,12 @@ collage.NewAction("logout").WithPath("en", "/logout").WithMethods(http.MethodPos
   a provider that rotates refresh tokens strictly can then refuse one of them.
 - **Guard and action redirects stay unchecked.** Only `next` is validated, by
   `collage.SafeRedirect`.
+
+## Changes
+
+### v0.1.2
+
+- collage.json is regenerated for editors: it lists the `oauthLogin` template
+  function, and `issuer` and `offline` say what they do with a preset. Nothing
+  else changes.
+- Requires collage v0.58.0.
