@@ -62,12 +62,7 @@ func randomString() (string, error) {
 // redirectURI is the callback address the provider sends the reader back to. It
 // follows the host the reader signed in on. "" means no origin can be told.
 func (p *Plugin) redirectURI(r *http.Request, name string) string {
-	var origin string
-	if origins, ok := p.host.(collage.Origins); ok {
-		origin = origins.OriginFor(r.Context(), r.Host)
-	} else {
-		origin = p.host.BaseURL()
-	}
+	origin := p.host.OriginFor(r.Context(), r.Host)
 	if origin == "" {
 		if !p.host.DevMode() {
 			return ""
