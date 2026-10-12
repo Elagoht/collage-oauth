@@ -18,17 +18,21 @@ type Options struct {
 	// ErrorPath is a page given ?error=<code> when a sign-in fails. Empty means
 	// the built-in status pages.
 	ErrorPath string `json:"errorPath"`
+	// KeyEnv names the environment variable holding Key, hex-encoded. When set,
+	// it wins over Key, and an unset, empty or non-hex variable is an error.
+	KeyEnv string `json:"keyEnv"`
 	// Key seals the tokens kept in Store, so it is required with Store. At least
-	// 32 bytes. In configuration it is KeyHex.
+	// 32 bytes. Set from Go; configuration names it with KeyEnv.
 	Key []byte `json:"-"`
-	// KeyHex is Key, hex-encoded, as configuration carries it. When both are set,
-	// KeyHex wins.
-	KeyHex string `json:"key"`
+	// PreviousKeysEnv names the environment variable holding PreviousKeys,
+	// hex-encoded and comma-separated. When set, it wins over PreviousKeys; a
+	// variable that is not set, or a key in it that is not hex, is an error, and
+	// one set but empty is no previous keys.
+	PreviousKeysEnv string `json:"previousKeysEnv"`
 	// PreviousKeys still open what they sealed, so Key can be rotated. A token
-	// opened with one is sealed again with Key the next time it is saved.
+	// opened with one is sealed again with Key the next time it is saved. Set
+	// from Go; configuration names them with PreviousKeysEnv.
 	PreviousKeys [][]byte `json:"-"`
-	// PreviousKeysHex is PreviousKeys, hex-encoded, as configuration carries it.
-	PreviousKeysHex []string `json:"previousKeys"`
 
 	// OnLogin turns a verified identity into the application's user ID, creating
 	// the user when it must. Required. An error ends the sign-in.

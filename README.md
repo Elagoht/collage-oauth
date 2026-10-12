@@ -16,7 +16,7 @@ go get github.com/Elagoht/collage-oauth
 app, err := collage.New(&collage.Config{
 	BaseURL: "https://example.com",
 	Plugins: []collage.Plugin{
-		session.New(session.Options{KeyHex: os.Getenv("SESSION_KEY")}),
+		session.New(session.Options{KeyEnv: "SESSION_KEY"}),
 		oauth.New(oauth.Options{
 			Providers: []oauth.Provider{{
 				Name:            "google",
@@ -36,9 +36,9 @@ app, err := collage.New(&collage.Config{
 <a href="{{oauthLogin "google"}}">Sign in with Google</a>
 ```
 
-Requires collage v0.58.0 or later and collage-session v0.2.3 or later. Register
-elagoht/session too: without it the login routes answer `500` and log which
-plugin is missing.
+Requires collage v0.61.0 or later and collage-session v0.3.0 or later. Register
+elagoht/session too: without it the login routes answer `500` and
+log which plugin is missing. `collage plugin add oauth` adds it for you.
 
 ## How a sign-in goes
 
@@ -75,8 +75,10 @@ With `"strict"` the browser leaves the cookie off and every sign-in fails with
 | `Prefix` | `prefix` | `"/auth"` | Where the routes live: `{prefix}/{name}/login` and `{prefix}/{name}/callback`. Starts with `/` |
 | `AfterLogin` | `afterLogin` | `"/"` | Where a sign-in without a `next` ends |
 | `ErrorPath` | `errorPath` | | A page on this site given `?error=<code>`; empty means the built-in status pages. Must be a path starting with a single `/`; `?error=` is added to its own query |
-| `Key` | `key` (hex) | | Seals the tokens kept in `Store`: at least 32 bytes; required with `Store` |
-| `PreviousKeys` | `previousKeys` (hex) | | Keys that still open what they sealed, so `Key` can be rotated |
+| `KeyEnv` | `keyEnv` | | The environment variable holding `Key`, hex-encoded. When set it wins over `Key`; unset, empty or not hex stops the application |
+| `Key` | not configurable | | Seals the tokens kept in `Store`: at least 32 bytes; required with `Store`. Go only; configuration names it with `keyEnv` |
+| `PreviousKeysEnv` | `previousKeysEnv` | | The environment variable holding `PreviousKeys`, hex-encoded and comma-separated. When set it wins over `PreviousKeys`; unset or a key that is not hex stops the application, set but empty is none |
+| `PreviousKeys` | not configurable | | Keys that still open what they sealed, so `Key` can be rotated. Go only; configuration names them with `previousKeysEnv` |
 | `OnLogin` | not configurable | | `func(ctx, Identity) (userID string, err error)`. Required. Go only |
 | `Store` | not configurable | | Keeps the sealed tokens. Optional; see [API access](#api-access). Go only |
 | `HTTPClient` | not configurable | 10s timeout | The `*http.Client` for calls to the provider. Go only |
@@ -100,8 +102,9 @@ empty environment variable is not set). The application does not start for any
 of: no providers, a provider without a name or with a name used twice, an unknown
 preset, neither preset nor issuer, an issuer that is not `https` (plain `http` is
 allowed only to `localhost` and loopback IPs), no client ID, no client secret, a
-`Store` without a `Key`, a key under 32 bytes or not valid hex (the error names no
-byte of it), no `OnLogin`, a prefix that does not start with `/`, an `errorPath`
+`Store` without a `Key`, a key or previous key under 32 bytes, a `keyEnv` or
+`previousKeysEnv` that is not set or not valid hex (the error names the variable,
+never a byte of the key), no `OnLogin`, a prefix that does not start with `/`, an `errorPath`
 that is not a path on this site.
 
 ```json
@@ -113,12 +116,13 @@ that is not a path on this site.
     ],
     "afterLogin": "/account",
     "errorPath": "/sign-in-failed",
-    "key": "9f2c...64 hex digits..."
+    "keyEnv": "OAUTH_KEY"
   }
 }
 ```
 
-Keep the secret and the key out of a file under version control. `OnLogin` and
+The secret and the key stay out of the file: it names the environment variables
+that hold them. `OnLogin` and
 `Store` are code, so configuration alone is not enough: set them in Go on the
 plugin's options.
 
@@ -190,8 +194,9 @@ type TokenStore interface {
 The `Store` sees opaque bytes. Tokens are sealed with AES-256-GCM under a key
 derived from `Key`, and the blob is bound to the user and provider it was saved
 for, so a blob copied to another row does not open. The `Key` is at least 32 bytes:
-`openssl rand -hex 32` makes one. To rotate it, set the new one as `Key` and move
-the old one to `PreviousKeys`; a token opened with a previous key is sealed again
+`openssl rand -hex 32` makes one. To rotate it, set the new one as `Key` (or in the
+variable `keyEnv` names) and move the old one to `PreviousKeys` (or the variable
+`previousKeysEnv` names); a token opened with a previous key is sealed again
 with `Key` the next time it is saved.
 
 ```go
@@ -289,6 +294,20 @@ collage.NewAction("logout").WithPath("en", "/logout").WithMethods(http.MethodPos
   `collage.SafeRedirect`.
 
 ## Changes
+
+### Changed in v0.2.0
+
+| Was | Now |
+| --- | --- |
+| `key` (hex), `Options.KeyHex` | `keyEnv`, the environment variable holding the hex key; `Options.Key []byte` stays for Go |
+| `previousKeys` (hex list), `Options.PreviousKeysHex` | `previousKeysEnv`, the variable holding them comma-separated; `Options.PreviousKeys [][]byte` stays for Go |
+| `Plugin.ServeHTTP` | unexported: the plugin mounts its own handler at `{prefix}/` in Init |
+| `Revoke(ctx, userID, name)` | `Revoke(ctx, userID, provider)`: the parameter is named as in `Client` (no change for callers) |
+
+A configuration that still has `key` or `previousKeys` stops the application with
+`unknown key "…"`. collage.json now requires elagoht/session, so `collage plugin
+add oauth` adds it first, and prints a note that `OnLogin` must be set in Go.
+Requires collage v0.61.0 and collage-session v0.3.0.
 
 ### v0.1.2
 

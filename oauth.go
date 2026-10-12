@@ -57,17 +57,7 @@ func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 func (p *Plugin) Name() string { return Name }
 
 // Version returns the plugin's version.
-func (p *Plugin) Version() string { return "0.1.3" }
-
-var errBadHex = errors.New("oauth: key is not valid hex")
-
-func decodeKey(s string) ([]byte, error) {
-	key, err := hex.DecodeString(s)
-	if err != nil {
-		return nil, errBadHex
-	}
-	return key, nil
-}
+func (p *Plugin) Version() string { return "0.2.0" }
 
 // Configure reads the configuration, checks it, and reserves {{oauthLogin}}.
 func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
@@ -100,10 +90,17 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 		return errors.New("oauth: OnLogin is required")
 	}
 
-	if o.KeyHex != "" {
-		key, err := decodeKey(o.KeyHex)
+	if o.KeyEnv != "" {
+		raw, set := os.LookupEnv(o.KeyEnv)
+		if !set {
+			return fmt.Errorf("oauth: key: the environment variable %s is not set", o.KeyEnv)
+		}
+		if raw == "" {
+			return fmt.Errorf("oauth: key: the environment variable %s is empty", o.KeyEnv)
+		}
+		key, err := hex.DecodeString(strings.TrimSpace(raw))
 		if err != nil {
-			return err
+			return fmt.Errorf("oauth: key: the environment variable %s is not valid hex", o.KeyEnv)
 		}
 		o.Key = key
 	}
@@ -113,14 +110,25 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	if o.Store != nil && len(o.Key) == 0 {
 		return errors.New("oauth: Store needs a key to seal tokens with")
 	}
-	previous := o.PreviousKeys
-	for _, h := range o.PreviousKeysHex {
-		key, err := decodeKey(h)
-		if err != nil {
-			return err
+	if o.PreviousKeysEnv != "" {
+		list, set := os.LookupEnv(o.PreviousKeysEnv)
+		if !set {
+			return fmt.Errorf("oauth: previous keys: the environment variable %s is not set", o.PreviousKeysEnv)
 		}
-		previous = append(previous[:len(previous):len(previous)], key)
+		var previous [][]byte
+		for i, h := range strings.Split(list, ",") {
+			if h = strings.TrimSpace(h); h == "" {
+				continue
+			}
+			key, err := hex.DecodeString(h)
+			if err != nil {
+				return fmt.Errorf("oauth: previous key %d in the environment variable %s is not valid hex", i, o.PreviousKeysEnv)
+			}
+			previous = append(previous, key)
+		}
+		o.PreviousKeys = previous
 	}
+	previous := o.PreviousKeys
 	for _, key := range previous {
 		if len(key) < 32 {
 			return errors.New("oauth: a previous key must be at least 32 bytes")
@@ -207,15 +215,15 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		return errors.New("oauth: register the plugin in Config.Plugins, where Configure runs")
 	}
 	p.host = host
-	return host.Handle(p.opts.Prefix+"/", p)
+	return host.Handle(p.opts.Prefix+"/", http.HandlerFunc(p.serve))
 }
 
 // Shutdown does nothing yet.
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
-// ServeHTTP dispatches {prefix}/{name}/login and {prefix}/{name}/callback. An
+// serve dispatches {prefix}/{name}/login and {prefix}/{name}/callback. An
 // unknown provider or path gets the 404 page, a method other than GET the 405 page.
-func (p *Plugin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (p *Plugin) serve(w http.ResponseWriter, r *http.Request) {
 	name, route, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, p.opts.Prefix+"/"), "/")
 	pr := p.providers[name]
 	if !ok || pr == nil || (route != "login" && route != "callback") {

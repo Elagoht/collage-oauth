@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"html"
 	"log/slog"
@@ -47,7 +48,7 @@ func newSiteApp(t *testing.T, tmpl string, tune func(*Options)) *siteApp {
 			"t/panel.html":   {Data: []byte(`panel`)},
 			"t/blog.html":    {Data: []byte(tmpl)},
 		}, Root: "t"},
-		Plugins: []collage.Plugin{session.New(session.Options{KeyHex: strings.Repeat("ab", 32)}), s.p},
+		Plugins: []collage.Plugin{session.New(session.Options{Key: bytes.Repeat([]byte{0xab}, 32)}), s.p},
 	})
 	if err != nil {
 		t.Fatal(err)

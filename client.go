@@ -542,22 +542,22 @@ func (p *Plugin) refresh(ctx context.Context, pr *provider, t stored) (stored, e
 // provider, or no row. The row is deleted even when the provider's revocation
 // fails; that error is returned after the deletion. If ctx ends while an
 // in-flight call is waited for, Revoke returns ctx's error having deleted nothing.
-func (p *Plugin) Revoke(ctx context.Context, userID, name string) error {
+func (p *Plugin) Revoke(ctx context.Context, userID, provider string) error {
 	store := p.opts.Store
 	if store == nil {
 		return ErrNotLinked
 	}
-	pr := p.providers[name]
+	pr := p.providers[provider]
 	if pr == nil {
-		return fmt.Errorf("oauth: unknown provider %q: %w", name, ErrNotLinked)
+		return fmt.Errorf("oauth: unknown provider %q: %w", provider, ErrNotLinked)
 	}
-	k := tokenKey{userID, name}
+	k := tokenKey{userID, provider}
 	c := p.tok.acquire(k, true)
 	defer p.tok.release(k, true)
 	if err := waitFor(ctx, c); err != nil {
 		return err
 	}
-	blob, err := store.Load(ctx, userID, name)
+	blob, err := store.Load(ctx, userID, provider)
 	if err != nil {
 		return fmt.Errorf("oauth: loading the token: %w", err)
 	}
@@ -565,10 +565,10 @@ func (p *Plugin) Revoke(ctx context.Context, userID, name string) error {
 		return ErrNotLinked
 	}
 	var revokeErr error
-	if t, _, err := p.open(userID, name, blob); err == nil {
+	if t, _, err := p.open(userID, provider, blob); err == nil {
 		revokeErr = p.revokeAtProvider(ctx, pr, t)
 	}
-	if err := store.Delete(ctx, userID, name); err != nil {
+	if err := store.Delete(ctx, userID, provider); err != nil {
 		return fmt.Errorf("oauth: deleting the token: %w", err)
 	}
 	return revokeErr

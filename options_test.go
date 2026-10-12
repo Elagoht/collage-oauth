@@ -1,14 +1,18 @@
 package oauth_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"os"
+	"slices"
 	"strings"
 	"testing"
-	"testing/fstest"
 
 	oauth "github.com/Elagoht/collage-oauth"
 	session "github.com/Elagoht/collage-session"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
 type stubStore struct{ rows map[string][]byte }
@@ -34,23 +38,31 @@ func google(name string) oauth.Provider {
 	return oauth.Provider{Name: name, Preset: "google", ClientID: "id", ClientSecret: "secret"}
 }
 
-// start builds an app with the plugin and starts it; the error is whichever
-// of collage.New (Configure) or Start (Init) came first.
-func start(t *testing.T, opts oauth.Options) error {
+// sessionPlugin is elagoht/session with a fixed key, which oauth needs before it.
+func sessionPlugin() collage.Plugin {
+	return session.New(session.Options{Key: bytes.Repeat([]byte{0xab}, 32)})
+}
+
+// start builds and starts an app with session and the plugin; the error is
+// whichever of Configure or Init came first. config, when given, is the
+// plugin's section of plugins-config.json.
+func start(t *testing.T, opts oauth.Options, config ...string) error {
 	t.Helper()
-	app, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>hi</p>`)}}, Root: "t"},
-		Plugins:  []collage.Plugin{session.New(session.Options{KeyHex: strings.Repeat("ab", 32)}), oauth.New(opts)},
-	})
-	if err != nil {
-		return err
+	options := []collagetest.SiteOption{collagetest.WithPlugins(sessionPlugin(), oauth.New(opts))}
+	if len(config) > 0 {
+		options = append(options, collagetest.WithPluginConfig(oauth.Name, config[0]))
 	}
-	return app.Start()
+	_, err := collagetest.TrySite(t, options...)
+	return err
 }
 
 func TestOptions_Invalid(t *testing.T) {
 	t.Setenv("OAUTH_TEST_UNSET", "")
+	t.Setenv("OAUTH_TEST_SHORT_KEY", strings.Repeat("ab", 31))
+	t.Setenv("OAUTH_TEST_BAD_KEY", "zz"+strings.Repeat("ab", 31))
+	t.Setenv("OAUTH_TEST_GOOD_KEY", strings.Repeat("ab", 32))
+	t.Setenv("OAUTH_TEST_BAD_PREVIOUS", strings.Repeat("ef", 32)+",zz")
+	t.Setenv("OAUTH_TEST_SHORT_PREVIOUS", strings.Repeat("ef", 31))
 	good := func() oauth.Options {
 		return oauth.Options{Providers: []oauth.Provider{google("google")}, OnLogin: onLogin}
 	}
@@ -67,11 +79,21 @@ func TestOptions_Invalid(t *testing.T) {
 		},
 		"no secret at all": func(o *oauth.Options) { o.Providers[0].ClientSecret = "" },
 		"store, no key":    func(o *oauth.Options) { o.Store = &stubStore{} },
-		"short key hex": func(o *oauth.Options) {
-			o.KeyHex = strings.Repeat("ab", 31)
+		"short key":        func(o *oauth.Options) { o.Key = bytes.Repeat([]byte{1}, 31) },
+		"short key env":    func(o *oauth.Options) { o.KeyEnv = "OAUTH_TEST_SHORT_KEY" },
+		"bad key env":      func(o *oauth.Options) { o.KeyEnv = "OAUTH_TEST_BAD_KEY" },
+		"unset key env":    func(o *oauth.Options) { o.KeyEnv = "OAUTH_TEST_NEVER_SET" },
+		"empty key env":    func(o *oauth.Options) { o.KeyEnv = "OAUTH_TEST_UNSET" },
+		"bad previous env": func(o *oauth.Options) {
+			o.KeyEnv = "OAUTH_TEST_GOOD_KEY"
+			o.PreviousKeysEnv = "OAUTH_TEST_BAD_PREVIOUS"
 		},
-		"bad key hex":                 func(o *oauth.Options) { o.KeyHex = "zz" + strings.Repeat("ab", 31) },
-		"bad previous hex":            func(o *oauth.Options) { o.KeyHex = strings.Repeat("ab", 32); o.PreviousKeysHex = []string{"zz"} },
+		"unset previous env": func(o *oauth.Options) { o.KeyEnv = "OAUTH_TEST_GOOD_KEY"; o.PreviousKeysEnv = "OAUTH_TEST_NEVER_SET" },
+		"short previous env": func(o *oauth.Options) {
+			o.KeyEnv = "OAUTH_TEST_GOOD_KEY"
+			o.PreviousKeysEnv = "OAUTH_TEST_SHORT_PREVIOUS"
+		},
+		"short previous from Go":      func(o *oauth.Options) { o.Key = testKey(); o.PreviousKeys = [][]byte{{1, 2}} },
 		"provider name with NUL":      func(o *oauth.Options) { o.Providers[0].Name = "a\x00b" },
 		"provider name with newline":  func(o *oauth.Options) { o.Providers[0].Name = "a\nb" },
 		"provider name with DEL":      func(o *oauth.Options) { o.Providers[0].Name = "a\x7fb" },
@@ -96,11 +118,11 @@ func TestOptions_Invalid(t *testing.T) {
 			if err == nil {
 				t.Fatal("started; want an error")
 			}
-			if strings.Contains(name, "bad") && strings.Contains(err.Error(), "zz") {
-				t.Errorf("error names a byte of the key: %v", err)
+			if strings.Contains(err.Error(), "zz") || strings.Contains(err.Error(), "abab") || strings.Contains(err.Error(), "efef") {
+				t.Errorf("error names a byte of a key: %v", err)
 			}
-			if strings.Contains(name, "bad") && !strings.Contains(err.Error(), "oauth: key is not valid hex") {
-				t.Errorf("err = %v, want the fixed hex message", err)
+			if strings.Contains(name, "env") && !strings.Contains(name, "short") && !strings.Contains(err.Error(), "OAUTH_TEST_") {
+				t.Errorf("err = %v, want it to name the environment variable", err)
 			}
 		})
 	}
@@ -108,12 +130,19 @@ func TestOptions_Invalid(t *testing.T) {
 
 func TestOptions_Valid(t *testing.T) {
 	t.Setenv("OAUTH_TEST_SECRET", "s3")
+	t.Setenv("OAUTH_TEST_KEY", strings.Repeat("cd", 32))
+	t.Setenv("OAUTH_TEST_PREVIOUS", strings.Repeat("ef", 32)+", "+strings.Repeat("12", 32))
+	t.Setenv("OAUTH_TEST_NO_PREVIOUS", "")
 	for name, o := range map[string]oauth.Options{
 		"preset and Go secret": {Providers: []oauth.Provider{google("google")}, OnLogin: onLogin},
 		"env secret, issuer, store, previous keys": {
 			Providers: []oauth.Provider{{Name: "corp", Issuer: "https://id.example.com", ClientID: "x", ClientSecretEnv: "OAUTH_TEST_SECRET"}},
-			OnLogin:   onLogin, Store: &stubStore{}, KeyHex: strings.Repeat("cd", 32),
-			PreviousKeysHex: []string{strings.Repeat("ef", 32)}, Prefix: "/sso/",
+			OnLogin:   onLogin, Store: &stubStore{}, KeyEnv: "OAUTH_TEST_KEY",
+			PreviousKeysEnv: "OAUTH_TEST_PREVIOUS", Prefix: "/sso/",
+		},
+		"Go key, empty previous env": {
+			Providers: []oauth.Provider{google("google")}, OnLogin: onLogin, Store: &stubStore{},
+			Key: testKey(), PreviousKeys: [][]byte{testKey()}, PreviousKeysEnv: "OAUTH_TEST_NO_PREVIOUS",
 		},
 		"http issuer on loopback": {
 			Providers: []oauth.Provider{
@@ -134,7 +163,58 @@ func TestOptions_Valid(t *testing.T) {
 
 func TestPlugin_Identity(t *testing.T) {
 	p := oauth.New(oauth.Options{})
-	if p.Name() != "elagoht/oauth" || p.Version() != "0.1.3" || oauth.Name != p.Name() {
+	if p.Name() != "elagoht/oauth" || p.Version() != "0.2.0" || oauth.Name != p.Name() {
 		t.Errorf("Name/Version = %q/%q", p.Name(), p.Version())
+	}
+}
+
+func testKey() []byte { return bytes.Repeat([]byte{7}, 32) }
+
+// TestOptions_KeysFromConfiguration: keyEnv and previousKeysEnv are read from
+// plugins-config.json; the v0.1 keys key and previousKeys, which carried the
+// secrets themselves, stop the application.
+func TestOptions_KeysFromConfiguration(t *testing.T) {
+	t.Setenv("OAUTH_TEST_KEY", strings.Repeat("cd", 32))
+	t.Setenv("OAUTH_TEST_PREVIOUS", strings.Repeat("ef", 32))
+	t.Setenv("OAUTH_TEST_SECRET", "s3")
+	providers := `"providers":[{"name":"google","preset":"google","clientID":"id","clientSecretEnv":"OAUTH_TEST_SECRET"}]`
+	opts := oauth.Options{OnLogin: onLogin, Store: &stubStore{}}
+	if err := start(t, opts, `{`+providers+`,"keyEnv":"OAUTH_TEST_KEY","previousKeysEnv":"OAUTH_TEST_PREVIOUS"}`); err != nil {
+		t.Fatalf("keyEnv/previousKeysEnv: %v", err)
+	}
+	if err := start(t, opts, `{`+providers+`,"keyEnv":"OAUTH_TEST_UNSET_KEY"}`); err == nil || !strings.Contains(err.Error(), "OAUTH_TEST_UNSET_KEY is not set") {
+		t.Errorf("unset keyEnv: err = %v", err)
+	}
+	for _, old := range []string{
+		`"key":"` + strings.Repeat("cd", 32) + `"`,
+		`"previousKeys":["` + strings.Repeat("ef", 32) + `"]`,
+	} {
+		err := start(t, opts, `{`+providers+`,"keyEnv":"OAUTH_TEST_KEY",`+old+`}`)
+		if err == nil || !strings.Contains(err.Error(), "unknown key") {
+			t.Errorf("%s: err = %v, want unknown key", old, err)
+		}
+	}
+}
+
+// TestManifest_RequiresSession: oauth imports collage-session and cannot sign
+// anyone in without it, so collage plugin add must add it too; and New(Options{})
+// cannot start (OnLogin is Go-only), so the manifest carries a setup note.
+func TestManifest_RequiresSession(t *testing.T) {
+	raw, err := os.ReadFile("collage.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Requires []string `json:"requires"`
+		Setup    string   `json:"setup"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(m.Requires, session.Name) {
+		t.Errorf("requires = %q, want %s", m.Requires, session.Name)
+	}
+	if !strings.Contains(m.Setup, "OnLogin") {
+		t.Errorf("setup = %q, want it to name OnLogin", m.Setup)
 	}
 }

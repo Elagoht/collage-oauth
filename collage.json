@@ -3,6 +3,10 @@
   "name": "elagoht/oauth",
   "description": "Package oauth signs a reader in with an OpenID Connect provider through elagoht/session, and keeps the provider's API tokens sealed and refreshed.",
   "repository": "https://github.com/Elagoht/collage-oauth",
+  "requires": [
+    "elagoht/session"
+  ],
+  "setup": "Set `OnLogin` in Go: `oauth.New(oauth.Options{OnLogin: func(ctx context.Context, id oauth.Identity) (string, error) { … }})` turns the verified identity into your user ID, and without it the application does not start. Configure at least one provider under `providers` in plugins-config.json, with its secret in the environment variable `clientSecretEnv` names. elagoht/session must be in Config.Plugins too. To keep API tokens, set `Store` in Go and a key with `keyEnv`.",
   "templateFunctions": [
     {
       "name": "oauthLogin",
@@ -23,20 +27,17 @@
         "type": "string",
         "description": "ErrorPath is a page given ?error=\u003ccode\u003e when a sign-in fails. Empty means the built-in status pages."
       },
-      "key": {
+      "keyEnv": {
         "type": "string",
-        "description": "KeyHex is Key, hex-encoded, as configuration carries it. When both are set, KeyHex wins."
+        "description": "KeyEnv names the environment variable holding Key, hex-encoded. When set, it wins over Key, and an unset, empty or non-hex variable is an error."
       },
       "prefix": {
         "type": "string",
         "description": "Prefix is where the login routes live: {prefix}/{provider}/login and {prefix}/{provider}/callback. It starts with \"/\". Default \"/auth\"."
       },
-      "previousKeys": {
-        "type": "array",
-        "description": "PreviousKeysHex is PreviousKeys, hex-encoded, as configuration carries it.",
-        "items": {
-          "type": "string"
-        }
+      "previousKeysEnv": {
+        "type": "string",
+        "description": "PreviousKeysEnv names the environment variable holding PreviousKeys, hex-encoded and comma-separated. When set, it wins over PreviousKeys; a variable that is not set, or a key in it that is not hex, is an error, and one set but empty is no previous keys."
       },
       "providers": {
         "type": "array",

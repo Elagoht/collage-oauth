@@ -6,14 +6,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	session "github.com/Elagoht/collage-session"
@@ -52,25 +50,7 @@ type callbackApp struct {
 	p      *Plugin
 	f      *fakeProvider
 	logins []Identity
-	logs   *syncBuf
-}
-
-// syncBuf is a log sink safe for the server's goroutines.
-type syncBuf struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (s *syncBuf) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuf) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
+	logs   *collagetest.Logs
 }
 
 // newCallbackApp builds a development-mode app with session, the oauth plugin,
@@ -84,7 +64,7 @@ func newCallbackApp(t *testing.T, errorPath string, onLogin LoginFunc) *callback
 // newCallbackAppWith is newCallbackApp with tune adjusting the Options first.
 func newCallbackAppWith(t *testing.T, errorPath string, onLogin LoginFunc, tune func(*Options)) *callbackApp {
 	t.Helper()
-	a := &callbackApp{f: newFakeProvider(t), logs: &syncBuf{}}
+	a := &callbackApp{f: newFakeProvider(t)}
 	if onLogin == nil {
 		onLogin = func(context.Context, Identity) (string, error) { return "u", nil }
 	}
@@ -101,37 +81,24 @@ func newCallbackAppWith(t *testing.T, errorPath string, onLogin LoginFunc, tune 
 		tune(&opts)
 	}
 	a.p = New(opts)
-	cfg := &collage.Config{
-		DevMode: true,
-		Logger:  slog.New(slog.NewTextHandler(a.logs, nil)),
-		Server:  collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/private.html": {Data: []byte(`<div>{{slot "content"}}</div>`)},
-			"t/panel.html":   {Data: []byte(`panel`)},
-		}, Root: "t"},
-		Plugins: []collage.Plugin{
-			session.New(session.Options{KeyHex: strings.Repeat("ab", 32)}),
-			a.p, sidPlugin{},
-		},
-	}
-	app, err := collage.New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
 	private := collage.NewFragment("private", "private.html").WithGuard(session.RequireUser("/login")).Build()
 	page := collage.NewPage("panel").
 		WithLayouts(private).
 		WithContent(collage.NewFragment("panel", "panel.html").Build()).
 		WithPath("en", "/panel").
 		Build()
-	if err := app.RegisterPage(page); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.Start(); err != nil {
-		t.Fatal(err)
-	}
-	a.h = app.Handler()
-	a.c = collagetest.New(t, a.h)
+	site := collagetest.NewSite(t,
+		collagetest.WithPlugins(session.New(session.Options{Key: bytes.Repeat([]byte{0xab}, 32)}), a.p, sidPlugin{}),
+		collagetest.WithTemplates(map[string]string{
+			"private.html": `<div>{{slot "content"}}</div>`,
+			"panel.html":   `panel`,
+		}),
+		collagetest.WithRegister(page),
+		collagetest.WithConfig(func(cfg *collage.Config) { cfg.DevMode = true }),
+	)
+	a.logs = site.Logs
+	a.h = site.App.Handler()
+	a.c = site.Client
 	return a
 }
 

@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -72,7 +73,7 @@ func newLoginAppCfg(t *testing.T, withSession bool, mod func(*collage.Config), e
 	})
 	var plugins []collage.Plugin
 	if withSession {
-		plugins = append(plugins, session.New(session.Options{KeyHex: strings.Repeat("ab", 32)}))
+		plugins = append(plugins, session.New(session.Options{Key: bytes.Repeat([]byte{0xab}, 32)}))
 	}
 	plugins = append(plugins, extra...)
 	plugins = append(plugins, p, peekPlugin{p})
