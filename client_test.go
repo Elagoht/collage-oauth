@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -268,6 +269,38 @@ func TestClient_ReSealsWithCurrentKey(t *testing.T) {
 		if err != nil || got.AccessToken != tc.want {
 			t.Errorf("%s: under Key = %+v, %v; want sealed again with Key", tc.user, got, err)
 		}
+	}
+}
+
+// Keys from the environment rotate: a token sealed under keyEnv's key does not
+// open under a new key alone, opens once the old key is in previousKeysEnv, and
+// is then sealed again under the new key.
+func TestClient_RotationThroughEnvironment(t *testing.T) {
+	const keyEnv, previousEnv = "OAUTH_TEST_ROTATE_KEY", "OAUTH_TEST_ROTATE_PREVIOUS"
+	t.Setenv(keyEnv, hex.EncodeToString(testKey(1)))
+	before, st := newClientApp(t, func(o *Options) { o.Key, o.KeyEnv = nil, keyEnv })
+	before.callback("c1", before.login(t, "c1")).WantStatus(303)
+	if _, _, err := sealPlugin(testKey(1)).open("app-user", "test", st.row("app-user", "test")); err != nil {
+		t.Fatalf("the token is not sealed with keyEnv's key: %v", err)
+	}
+
+	rotated := func(previous string) *callbackApp {
+		t.Setenv(previousEnv, previous)
+		a, _ := newClientApp(t, func(o *Options) {
+			o.Store, o.Key, o.KeyEnv, o.PreviousKeysEnv = st, nil, keyEnv, previousEnv
+		})
+		return a
+	}
+	t.Setenv(keyEnv, hex.EncodeToString(testKey(2)))
+	wantNotLinked(t, rotated(hex.EncodeToString(testKey(9))), "app-user")
+	if st.row("app-user", "test") == nil {
+		t.Fatal("a token no key opened was deleted")
+	}
+
+	wantAPI(t, rotated(hex.EncodeToString(testKey(9))+", "+hex.EncodeToString(testKey(1))), "app-user", "Bearer access-c1")
+	got, current, err := sealPlugin(testKey(2)).open("app-user", "test", st.row("app-user", "test"))
+	if err != nil || !current || got.AccessToken != "access-c1" {
+		t.Errorf("under the new key = %+v, %v, %v; want sealed again with it", got, current, err)
 	}
 }
 
