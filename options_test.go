@@ -61,6 +61,7 @@ func TestOptions_Invalid(t *testing.T) {
 	t.Setenv("OAUTH_TEST_SHORT_KEY", strings.Repeat("ab", 31))
 	t.Setenv("OAUTH_TEST_BAD_KEY", "zz"+strings.Repeat("ab", 31))
 	t.Setenv("OAUTH_TEST_GOOD_KEY", strings.Repeat("ab", 32))
+	t.Setenv("OAUTH_TEST_BLANK_KEY", "  ")
 	t.Setenv("OAUTH_TEST_BAD_PREVIOUS", strings.Repeat("ef", 32)+",zz")
 	t.Setenv("OAUTH_TEST_SHORT_PREVIOUS", strings.Repeat("ef", 31))
 	good := func() oauth.Options {
@@ -84,6 +85,7 @@ func TestOptions_Invalid(t *testing.T) {
 		"bad key env":      func(o *oauth.Options) { o.KeyEnv = "OAUTH_TEST_BAD_KEY" },
 		"unset key env":    func(o *oauth.Options) { o.KeyEnv = "OAUTH_TEST_NEVER_SET" },
 		"empty key env":    func(o *oauth.Options) { o.KeyEnv = "OAUTH_TEST_UNSET" },
+		"blank key env":    func(o *oauth.Options) { o.KeyEnv = "OAUTH_TEST_BLANK_KEY" },
 		"bad previous env": func(o *oauth.Options) {
 			o.KeyEnv = "OAUTH_TEST_GOOD_KEY"
 			o.PreviousKeysEnv = "OAUTH_TEST_BAD_PREVIOUS"

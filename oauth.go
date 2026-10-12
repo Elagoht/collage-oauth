@@ -95,10 +95,10 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 		if !set {
 			return fmt.Errorf("oauth: key: the environment variable %s is not set", o.KeyEnv)
 		}
-		if raw == "" {
+		if raw = strings.TrimSpace(raw); raw == "" {
 			return fmt.Errorf("oauth: key: the environment variable %s is empty", o.KeyEnv)
 		}
-		key, err := hex.DecodeString(strings.TrimSpace(raw))
+		key, err := hex.DecodeString(raw)
 		if err != nil {
 			return fmt.Errorf("oauth: key: the environment variable %s is not valid hex", o.KeyEnv)
 		}

@@ -36,7 +36,7 @@ app, err := collage.New(&collage.Config{
 <a href="{{oauthLogin "google"}}">Sign in with Google</a>
 ```
 
-Requires collage v0.61.0 or later and collage-session v0.3.0 or later. Register
+Requires collage v0.61.1 or later and collage-session v0.3.0 or later. Register
 elagoht/session too: without it the login routes answer `500` and
 log which plugin is missing. `collage plugin add oauth` adds it for you.
 
@@ -300,14 +300,14 @@ collage.NewAction("logout").WithPath("en", "/logout").WithMethods(http.MethodPos
 | Was | Now |
 | --- | --- |
 | `key` (hex), `Options.KeyHex` | `keyEnv`, the environment variable holding the hex key; `Options.Key []byte` stays for Go |
-| `previousKeys` (hex list), `Options.PreviousKeysHex` | `previousKeysEnv`, the variable holding them comma-separated; `Options.PreviousKeys [][]byte` stays for Go |
+| `previousKeys` (hex list), `Options.PreviousKeysHex` | `previousKeysEnv`, the variable holding them comma-separated; `Options.PreviousKeys [][]byte` stays for Go. When set, `previousKeysEnv` replaces the Go `PreviousKeys` rather than adding to them, as `previousKeys` did |
 | `Plugin.ServeHTTP` | unexported: the plugin mounts its own handler at `{prefix}/` in Init |
 | `Revoke(ctx, userID, name)` | `Revoke(ctx, userID, provider)`: the parameter is named as in `Client` (no change for callers) |
 
 A configuration that still has `key` or `previousKeys` stops the application with
 `unknown key "…"`. collage.json now requires elagoht/session, so `collage plugin
 add oauth` adds it first, and prints a note that `OnLogin` must be set in Go.
-Requires collage v0.61.0 and collage-session v0.3.0.
+Requires collage v0.61.1 and collage-session v0.3.0.
 
 ### v0.1.2
 
