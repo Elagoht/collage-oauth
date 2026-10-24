@@ -16,7 +16,7 @@ go get github.com/Elagoht/collage-oauth
 app, err := collage.New(&collage.Config{
 	BaseURL: "https://example.com",
 	Plugins: []collage.Plugin{
-		session.New(session.Options{KeyEnv: "SESSION_KEY"}),
+		session.New(session.Options{}),
 		oauth.New(oauth.Options{
 			Providers: []oauth.Provider{{
 				Name:            "google",
@@ -75,9 +75,9 @@ With `"strict"` the browser leaves the cookie off and every sign-in fails with
 | `Prefix` | `prefix` | `"/auth"` | Where the routes live: `{prefix}/{name}/login` and `{prefix}/{name}/callback`. Starts with `/` |
 | `AfterLogin` | `afterLogin` | `"/"` | Where a sign-in without a `next` ends |
 | `ErrorPath` | `errorPath` | | A page on this site given `?error=<code>`; empty means the built-in status pages. Must be a path starting with a single `/`; `?error=` is added to its own query |
-| `KeyEnv` | `keyEnv` | | The environment variable holding `Key`, hex-encoded. When set it wins over `Key`; unset, empty or not hex stops the application |
+| `KeyEnv` | `keyEnv` | `OAUTH_KEY` | The environment variable holding `Key`, hex-encoded. When set it wins over `Key`; unset, empty or not hex stops the application. Unset, with no `Key` either, `OAUTH_KEY` is read: it may be unset or empty, and not hex stops the application |
 | `Key` | not configurable | | Seals the tokens kept in `Store`: at least 32 bytes; required with `Store`. Go only; configuration names it with `keyEnv` |
-| `PreviousKeysEnv` | `previousKeysEnv` | | The environment variable holding `PreviousKeys`, hex-encoded and comma-separated. When set it wins over `PreviousKeys`; unset or a key that is not hex stops the application, set but empty is none |
+| `PreviousKeysEnv` | `previousKeysEnv` | `OAUTH_PREVIOUS_KEYS` | The environment variable holding `PreviousKeys`, hex-encoded and comma-separated. When set it wins over `PreviousKeys`; unset or a key that is not hex stops the application, set but empty is none. Unset, with no `PreviousKeys` either, `OAUTH_PREVIOUS_KEYS` is read when it is set |
 | `PreviousKeys` | not configurable | | Keys that still open what they sealed, so `Key` can be rotated. Go only; configuration names them with `previousKeysEnv` |
 | `OnLogin` | not configurable | | `func(ctx, Identity) (userID string, err error)`. Required. Go only |
 | `Store` | not configurable | | Keeps the sealed tokens. Optional; see [API access](#api-access). Go only |
@@ -103,7 +103,8 @@ of: no providers, a provider without a name or with a name used twice, an unknow
 preset, neither preset nor issuer, an issuer that is not `https` (plain `http` is
 allowed only to `localhost` and loopback IPs), no client ID, no client secret, a
 `Store` without a `Key`, a key or previous key under 32 bytes, a `keyEnv` or
-`previousKeysEnv` that is not set or not valid hex (the error names the variable,
+`previousKeysEnv` that is not set or not valid hex, an `OAUTH_KEY` or
+`OAUTH_PREVIOUS_KEYS` that is not valid hex (the error names the variable,
 never a byte of the key), no `OnLogin`, a prefix that does not start with `/`, an `errorPath`
 that is not a path on this site.
 
@@ -115,14 +116,13 @@ that is not a path on this site.
         "clientSecretEnv": "GOOGLE_CLIENT_SECRET", "offline": true }
     ],
     "afterLogin": "/account",
-    "errorPath": "/sign-in-failed",
-    "keyEnv": "OAUTH_KEY"
+    "errorPath": "/sign-in-failed"
   }
 }
 ```
 
-The secret and the key stay out of the file: it names the environment variables
-that hold them. `OnLogin` and
+The secret and the key stay out of the file: it names the environment variable
+that holds the secret, and the key is read from `OAUTH_KEY`. `OnLogin` and
 `Store` are code, so configuration alone is not enough: set them in Go on the
 plugin's options.
 
@@ -194,9 +194,10 @@ type TokenStore interface {
 The `Store` sees opaque bytes. Tokens are sealed with AES-256-GCM under a key
 derived from `Key`, and the blob is bound to the user and provider it was saved
 for, so a blob copied to another row does not open. The `Key` is at least 32 bytes:
-`openssl rand -hex 32` makes one. To rotate it, set the new one as `Key` (or in the
-variable `keyEnv` names) and move the old one to `PreviousKeys` (or the variable
-`previousKeysEnv` names); a token opened with a previous key is sealed again
+`openssl rand -hex 32` makes one. To rotate it, set the new one as `Key` (or in
+`OAUTH_KEY`, or the variable `keyEnv` names) and move the old one to
+`PreviousKeys` (or `OAUTH_PREVIOUS_KEYS`, or the variable `previousKeysEnv`
+names); a token opened with a previous key is sealed again
 with `Key` the next time it is saved.
 
 ```go

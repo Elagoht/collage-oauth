@@ -57,6 +57,7 @@ func start(t *testing.T, opts oauth.Options, config ...string) error {
 }
 
 func TestOptions_Invalid(t *testing.T) {
+	t.Setenv(oauth.DefaultKeyEnv, "")
 	t.Setenv("OAUTH_TEST_UNSET", "")
 	t.Setenv("OAUTH_TEST_SHORT_KEY", strings.Repeat("ab", 31))
 	t.Setenv("OAUTH_TEST_BAD_KEY", "zz"+strings.Repeat("ab", 31))
@@ -165,7 +166,7 @@ func TestOptions_Valid(t *testing.T) {
 
 func TestPlugin_Identity(t *testing.T) {
 	p := oauth.New(oauth.Options{})
-	if p.Name() != "elagoht/oauth" || p.Version() != "0.2.0" || oauth.Name != p.Name() {
+	if p.Name() != "elagoht/oauth" || p.Version() != "0.3.0" || oauth.Name != p.Name() {
 		t.Errorf("Name/Version = %q/%q", p.Name(), p.Version())
 	}
 }

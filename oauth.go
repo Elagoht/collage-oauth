@@ -57,7 +57,7 @@ func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 func (p *Plugin) Name() string { return Name }
 
 // Version returns the plugin's version.
-func (p *Plugin) Version() string { return "0.2.0" }
+func (p *Plugin) Version() string { return "0.3.0" }
 
 // Configure reads the configuration, checks it, and reserves {{oauthLogin}}.
 func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
@@ -103,6 +103,12 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 			return fmt.Errorf("oauth: key: the environment variable %s is not valid hex", o.KeyEnv)
 		}
 		o.Key = key
+	} else if raw := strings.TrimSpace(os.Getenv(DefaultKeyEnv)); raw != "" && len(o.Key) == 0 {
+		key, err := hex.DecodeString(raw)
+		if err != nil {
+			return fmt.Errorf("oauth: key: the environment variable %s is not valid hex", DefaultKeyEnv)
+		}
+		o.Key = key
 	}
 	if len(o.Key) > 0 && len(o.Key) < 32 {
 		return errors.New("oauth: key must be at least 32 bytes")
@@ -115,16 +121,15 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 		if !set {
 			return fmt.Errorf("oauth: previous keys: the environment variable %s is not set", o.PreviousKeysEnv)
 		}
-		var previous [][]byte
-		for i, h := range strings.Split(list, ",") {
-			if h = strings.TrimSpace(h); h == "" {
-				continue
-			}
-			key, err := hex.DecodeString(h)
-			if err != nil {
-				return fmt.Errorf("oauth: previous key %d in the environment variable %s is not valid hex", i, o.PreviousKeysEnv)
-			}
-			previous = append(previous, key)
+		previous, err := previousKeys(o.PreviousKeysEnv, list)
+		if err != nil {
+			return err
+		}
+		o.PreviousKeys = previous
+	} else if list := os.Getenv(DefaultPreviousKeysEnv); list != "" && len(o.PreviousKeys) == 0 {
+		previous, err := previousKeys(DefaultPreviousKeysEnv, list)
+		if err != nil {
+			return err
 		}
 		o.PreviousKeys = previous
 	}
@@ -244,4 +249,21 @@ func (p *Plugin) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		p.host.ServeStatus(w, r, http.StatusNotFound)
 	}
+}
+
+// previousKeys reads list, the comma-separated hex keys the environment
+// variable name holds.
+func previousKeys(name, list string) ([][]byte, error) {
+	var previous [][]byte
+	for i, h := range strings.Split(list, ",") {
+		if h = strings.TrimSpace(h); h == "" {
+			continue
+		}
+		key, err := hex.DecodeString(h)
+		if err != nil {
+			return nil, fmt.Errorf("oauth: previous key %d in the environment variable %s is not valid hex", i, name)
+		}
+		previous = append(previous, key)
+	}
+	return previous, nil
 }

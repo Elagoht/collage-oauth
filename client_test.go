@@ -304,6 +304,25 @@ func TestClient_RotationThroughEnvironment(t *testing.T) {
 	}
 }
 
+// With neither keyEnv nor previousKeysEnv named, OAUTH_KEY and
+// OAUTH_PREVIOUS_KEYS hold the keys.
+func TestClient_DefaultKeyEnv(t *testing.T) {
+	t.Setenv(DefaultKeyEnv, hex.EncodeToString(testKey(1)))
+	before, st := newClientApp(t, func(o *Options) { o.Key = nil })
+	before.callback("c1", before.login(t, "c1")).WantStatus(303)
+	if _, _, err := sealPlugin(testKey(1)).open("app-user", "test", st.row("app-user", "test")); err != nil {
+		t.Fatalf("the token is not sealed with OAUTH_KEY: %v", err)
+	}
+
+	t.Setenv(DefaultKeyEnv, hex.EncodeToString(testKey(2)))
+	t.Setenv(DefaultPreviousKeysEnv, hex.EncodeToString(testKey(1)))
+	after, _ := newClientApp(t, func(o *Options) { o.Store, o.Key = st, nil })
+	wantAPI(t, after, "app-user", "Bearer access-c1")
+	if _, current, err := sealPlugin(testKey(2)).open("app-user", "test", st.row("app-user", "test")); err != nil || !current {
+		t.Errorf("not sealed again under OAUTH_KEY: %v, %v", current, err)
+	}
+}
+
 func TestRevoke_DropsTheCache(t *testing.T) {
 	ctx := context.Background()
 	a, st := newClientApp(t, nil)

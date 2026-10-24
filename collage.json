@@ -6,7 +6,7 @@
   "requires": [
     "elagoht/session"
   ],
-  "setup": "Set `OnLogin` in Go: `oauth.New(oauth.Options{OnLogin: func(ctx context.Context, id oauth.Identity) (string, error) { … }})` turns the verified identity into your user ID, and without it the application does not start. Configure at least one provider under `providers` in plugins-config.json, with its secret in the environment variable `clientSecretEnv` names. elagoht/session must be in Config.Plugins too. To keep API tokens, set `Store` in Go and a key with `keyEnv`.",
+  "setup": "Set `OnLogin` in Go: `oauth.New(oauth.Options{OnLogin: func(ctx context.Context, id oauth.Identity) (string, error) { … }})` turns the verified identity into your user ID, and without it the application does not start. Configure at least one provider under `providers` in plugins-config.json, with its secret in the environment variable `clientSecretEnv` names. elagoht/session must be in Config.Plugins too. To keep API tokens, set `Store` in Go and `OAUTH_KEY=` (`openssl rand -hex 32`) in `.env.development` and where production runs.",
   "templateFunctions": [
     {
       "name": "oauthLogin",
@@ -29,7 +29,7 @@
       },
       "keyEnv": {
         "type": "string",
-        "description": "KeyEnv names the environment variable holding Key, hex-encoded. When set, it wins over Key, and an unset, empty or non-hex variable is an error."
+        "description": "KeyEnv names the environment variable holding Key, hex-encoded. When set, it wins over Key, and an unset, empty or non-hex variable is an error. Unset, with no Key either, the key is read from OAUTH_KEY (DefaultKeyEnv)."
       },
       "prefix": {
         "type": "string",
@@ -37,7 +37,7 @@
       },
       "previousKeysEnv": {
         "type": "string",
-        "description": "PreviousKeysEnv names the environment variable holding PreviousKeys, hex-encoded and comma-separated. When set, it wins over PreviousKeys; a variable that is not set, or a key in it that is not hex, is an error, and one set but empty is no previous keys."
+        "description": "PreviousKeysEnv names the environment variable holding PreviousKeys, hex-encoded and comma-separated. When set, it wins over PreviousKeys; a variable that is not set, or a key in it that is not hex, is an error, and one set but empty is no previous keys. Unset, with no PreviousKeys either, they are read from OAUTH_PREVIOUS_KEYS (DefaultPreviousKeysEnv)."
       },
       "providers": {
         "type": "array",

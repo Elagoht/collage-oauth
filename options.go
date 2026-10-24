@@ -6,6 +6,14 @@ import (
 	"net/http"
 )
 
+// The environment variables the keys are read from when the options name none
+// and set none from Go. Unlike one KeyEnv or PreviousKeysEnv names, they may be
+// unset or empty.
+const (
+	DefaultKeyEnv          = "OAUTH_KEY"
+	DefaultPreviousKeysEnv = "OAUTH_PREVIOUS_KEYS"
+)
+
 // Options configures the plugin. In configuration the keys are the json names.
 type Options struct {
 	// Providers are the identity providers a reader may sign in with. At least one.
@@ -20,6 +28,7 @@ type Options struct {
 	ErrorPath string `json:"errorPath"`
 	// KeyEnv names the environment variable holding Key, hex-encoded. When set,
 	// it wins over Key, and an unset, empty or non-hex variable is an error.
+	// Unset, with no Key either, the key is read from OAUTH_KEY (DefaultKeyEnv).
 	KeyEnv string `json:"keyEnv"`
 	// Key seals the tokens kept in Store, so it is required with Store. At least
 	// 32 bytes. Set from Go; configuration names it with KeyEnv.
@@ -27,7 +36,8 @@ type Options struct {
 	// PreviousKeysEnv names the environment variable holding PreviousKeys,
 	// hex-encoded and comma-separated. When set, it wins over PreviousKeys; a
 	// variable that is not set, or a key in it that is not hex, is an error, and
-	// one set but empty is no previous keys.
+	// one set but empty is no previous keys. Unset, with no PreviousKeys either,
+	// they are read from OAUTH_PREVIOUS_KEYS (DefaultPreviousKeysEnv).
 	PreviousKeysEnv string `json:"previousKeysEnv"`
 	// PreviousKeys still open what they sealed, so Key can be rotated. A token
 	// opened with one is sealed again with Key the next time it is saved. Set
