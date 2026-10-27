@@ -166,7 +166,7 @@ func TestOptions_Valid(t *testing.T) {
 
 func TestPlugin_Identity(t *testing.T) {
 	p := oauth.New(oauth.Options{})
-	if p.Name() != "elagoht/oauth" || p.Version() != "0.3.0" || oauth.Name != p.Name() {
+	if p.Name() != "elagoht/oauth" || p.Version() != "0.3.1" || oauth.Name != p.Name() {
 		t.Errorf("Name/Version = %q/%q", p.Name(), p.Version())
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -15,22 +16,29 @@ import (
 	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
-// peekPlugin mounts /peek, which answers the pending sign-in the request's
-// session holds for the provider "test", as JSON; 404 when there is none.
+// peekPlugin answers /auth/test/peek, under the pending cookie's Path, with the
+// pending sign-in the request's cookie holds for the provider "test", as JSON;
+// 404 when there is none.
 type peekPlugin struct{ p *Plugin }
 
 func (peekPlugin) Name() string                   { return "test/peek" }
 func (peekPlugin) Version() string                { return "0" }
 func (peekPlugin) Shutdown(context.Context) error { return nil }
 func (k peekPlugin) Init(_ context.Context, host collage.Host) error {
-	return host.Handle("/peek", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pd, ok := k.p.pendingFor(r, "test")
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(pd)
-	}))
+	return host.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/auth/test/peek" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			pd, ok := k.p.pendingFor(r, "test")
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(pd)
+		})
+	})
 }
 
 // hostOrigins maps the host a.test to https://a.example.
@@ -95,7 +103,7 @@ func newLoginAppCfg(t *testing.T, withSession bool, mod func(*collage.Config), e
 
 func (a loginApp) peek(t *testing.T, base string) pending {
 	t.Helper()
-	res := a.c.Get(base + "/peek").WantStatus(http.StatusOK)
+	res := a.c.Get(base + "/auth/test/peek").WantStatus(http.StatusOK)
 	return decodePending(t, res.Body)
 }
 
@@ -355,25 +363,45 @@ func TestPending_EncodedWithoutHTMLEscapes(t *testing.T) {
 	}
 }
 
-// A next within the 1024-byte cap that the session still cannot hold ends at
-// AfterLogin rather than in a 500.
-func TestLogin_NextTooLargeForTheSessionEndsAtAfterLogin(t *testing.T) {
+// The pending sign-in is its own cookie: an escape-heavy next within the
+// 1024-byte cap fits, and a session near its own limit is left alone.
+func TestLogin_NextFitsThePendingCookie(t *testing.T) {
 	t.Run("escape-heavy next", func(t *testing.T) {
 		a := newLoginApp(t, true)
-		a.c.Get("/auth/test/login?next=" + url.QueryEscape("/"+strings.Repeat("<", 1023))).WantStatus(http.StatusSeeOther)
-		if got := a.peek(t, "").Next; got != "/" {
-			t.Errorf("stored a %d-byte next, want AfterLogin", len(got))
+		next := "/" + strings.Repeat("<", 1023)
+		a.c.Get("/auth/test/login?next=" + url.QueryEscape(next)).WantStatus(http.StatusSeeOther)
+		if got := a.peek(t, "").Next; got != next {
+			t.Errorf("stored a %d-byte next, want the 1024-byte one", len(got))
 		}
 	})
 	t.Run("session near its limit", func(t *testing.T) {
 		a := newLoginApp(t, true, sidPlugin{})
 		a.c.Get("/kv?k=fill&v=" + strings.Repeat("x", 2000)).WantStatus(http.StatusOK)
 		a.c.Get("/auth/test/login?next=/" + strings.Repeat("a", 1000)).WantStatus(http.StatusSeeOther)
-		if got := a.peek(t, "").Next; got != "/" {
-			t.Errorf("stored a %d-byte next, want AfterLogin", len(got))
+		if got := a.peek(t, "").Next; len(got) != 1001 {
+			t.Errorf("stored a %d-byte next, want 1001", len(got))
 		}
 		if got := a.c.Get("/kv?k=fill").Body; len(got) != 2000 {
 			t.Errorf("the session lost its own data: %d bytes", len(got))
 		}
 	})
+}
+
+// A pending sign-in whose next JSON would blow past what a browser keeps of a
+// cookie is kept without it, ending at AfterLogin.
+func TestPendingValue_TooLargeDropsNext(t *testing.T) {
+	p := New(Options{AfterLogin: "/home"})
+	value, err := p.pendingValue(pending{State: "s", Next: "/" + strings.Repeat("\x01", 1023)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pendingCookieName)+len(value) > maxPendingCookie {
+		t.Fatalf("cookie of %d bytes", len(pendingCookieName)+len(value))
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(&http.Cookie{Name: pendingCookieName, Value: value})
+	pd, ok := p.pendingFor(r, "test")
+	if !ok || pd.Next != "/home" || pd.State != "s" {
+		t.Errorf("pending = %+v, %v; want next /home, state kept", pd, ok)
+	}
 }

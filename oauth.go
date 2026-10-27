@@ -57,7 +57,7 @@ func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 func (p *Plugin) Name() string { return Name }
 
 // Version returns the plugin's version.
-func (p *Plugin) Version() string { return "0.3.0" }
+func (p *Plugin) Version() string { return "0.3.1" }
 
 // Configure reads the configuration, checks it, and reserves {{oauthLogin}}.
 func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {

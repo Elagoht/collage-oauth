@@ -45,12 +45,13 @@ log which plugin is missing. `collage plugin add oauth` adds it for you.
 1. `{{oauthLogin "google"}}` links to `/auth/google/login?next=<the current page>`.
    `{{oauthLogin "google" "/after"}}` names `next` yourself.
 2. The login route checks `next` with `collage.SafeRedirect`, keeps a one-use
-   pending sign-in in the session, and answers `303` to the provider with a
-   `state`, a `nonce` and a PKCE challenge.
+   pending sign-in in a cookie of its own (see below), and answers `303` to the
+   provider with a `state`, a `nonce` and a PKCE challenge. It starts no session.
 3. The provider sends the reader back to `/auth/google/callback`. The plugin
-   exchanges the code, checks the id_token's claims, and calls `OnLogin`.
-4. The session gets a new ID, is signed in under `session.UserKey`, and the reader
-   is sent to `next`.
+   deletes the pending cookie, exchanges the code, checks the id_token's claims,
+   and calls `OnLogin`.
+4. The session gets a new ID (or starts), is signed in under `session.UserKey`,
+   and the reader is sent to `next`. A failed sign-in starts no session.
 
 Both routes answer `GET` only: a `HEAD` (a link preview) must not start or spend a
 sign-in, so any other method is a `405`.
@@ -58,14 +59,33 @@ sign-in, so any other method is a `405`.
 `next` must be a path on this site. An absolute URL, `//host`, `/\host`, a
 backslash anywhere, a path that cleans into one of those (`/./\host`) and
 `javascript:` all end at `afterLogin` instead, and so does a `next` longer than
-1024 bytes, because the pending sign-in lives in the session cookie. A shorter
-`next` that the session still cannot hold (it holds data of its own) also ends at
-`afterLogin`. The final redirect is written exactly as checked, not cleaned again.
+1024 bytes, because the pending sign-in lives in a cookie. A shorter `next` that
+would still take that cookie past 4096 bytes also ends at `afterLogin`. The final
+redirect is written exactly as checked, not cleaned again.
 
-The session cookie must reach the callback, which is a navigation from the
-provider's site: keep elagoht/session's `sameSite` at its default, `"lax"`.
-With `"strict"` the browser leaves the cookie off and every sign-in fails with
-`state`.
+### The pending sign-in cookie
+
+Anybody can start a sign-in, so it is not kept in the session: a session is
+signed, lasts elagoht/session's `maxAge` and turns the page cache off for the
+reader who carries it, and one anonymous `GET` of the login route would hand
+anybody such a cookie. The pending sign-in is a cookie of its own instead:
+
+- `collage_oauth`, with `Path=/auth/<provider>/` (under `prefix`), so it is sent
+  to that provider's login and callback routes only, never to a page;
+- `Max-Age` ten minutes, how long a sign-in may stay at the provider;
+- `HttpOnly`, `SameSite=Lax` (the callback is a navigation from the provider's
+  site, which `Lax` lets through and `Strict` would not), and `Secure` over
+  HTTPS (`collage.IsHTTPS`);
+- deleted by the callback, whatever its outcome.
+
+It is not signed: a signature would add nothing, since what it could guard
+against is a cookie planted in a reader's browser, and an attacker can get a
+signed one as easily by starting a sign-in of their own. `next` is checked
+again before it becomes a `Location`.
+
+The session cookie should still reach the callback, so that a reader's session
+is signed in rather than replaced: keep elagoht/session's `sameSite` at its
+default, `"lax"`.
 
 ## Options
 
@@ -295,6 +315,17 @@ collage.NewAction("logout").WithPath("en", "/logout").WithMethods(http.MethodPos
   `collage.SafeRedirect`.
 
 ## Changes
+
+### Changed in v0.3.1
+
+- The pending sign-in is kept in a short cookie of its own, `collage_oauth`
+  (ten minutes, `Path=/auth/<provider>/`), not in the session. Before, one
+  anonymous `GET /auth/<provider>/login` started a signed session that turned
+  the page cache off for a week, for anybody replaying it. A session is now
+  started only by a successful callback. Nothing to change in configuration;
+  a sign-in in progress during the upgrade fails with `state` and is started
+  again. Session cookies an earlier version minted this way stay valid until
+  elagoht/session's `maxAge` ends them; rotate the session key to end them now.
 
 ### Changed in v0.2.0
 

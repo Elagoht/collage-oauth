@@ -5,18 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Elagoht/collage/pkg/collage"
 
 	session "github.com/Elagoht/collage-session"
 )
 
-// pending is a sign-in that has left for the provider and not come back. The
-// session holds one per provider, under pendingKey.
+// pending is a sign-in that has left for the provider and not come back. It is
+// kept in a cookie of its own, pendingCookieName, one per provider.
 type pending struct {
 	State    string `json:"s"`
 	Nonce    string `json:"n"`
@@ -28,20 +28,62 @@ type pending struct {
 // maxNext is the longest next a sign-in keeps; a longer one is as good as none.
 const maxNext = 1024
 
-func pendingKey(name string) string { return "oauth:" + name }
+// pendingCookieName is the cookie a pending sign-in is kept in. Each provider's
+// has its own Path, {prefix}/{provider}/, so two sign-ins do not meet.
+//
+// It is not the session: a session is signed, lasts MaxAge and turns the page
+// cache off, and anybody can start a sign-in. The cookie lives pendingTTL, is
+// sent only to the provider's login and callback routes, and nothing reads it
+// but the callback, which deletes it. It is not signed, because a signature
+// would add nothing: what it guards against is a cookie planted in a reader's
+// browser, and an attacker can plant a signed one as easily, by starting a
+// sign-in of their own. next is checked again before it is a Location.
+const pendingCookieName = "collage_oauth"
 
-// pendingFor reads the pending sign-in for the provider name from the request's
-// session. It reports false when there is none, or no session at all.
+// maxPendingCookie is the most the pending cookie's name and value may take
+// together: what every browser keeps of one cookie.
+const maxPendingCookie = 4096
+
+// pendingPath is the Path of the provider name's pending cookie.
+func (p *Plugin) pendingPath(name string) string {
+	return p.opts.Prefix + "/" + url.PathEscape(name) + "/"
+}
+
+// pendingFor reads the pending sign-in for the provider name from the
+// request's cookie. It reports false when there is none, or none that decodes.
 func (p *Plugin) pendingFor(r *http.Request, name string) (pending, bool) {
-	raw := session.FromContext(r.Context()).Get(pendingKey(name))
-	if raw == "" {
+	c, err := r.Cookie(pendingCookieName)
+	if err != nil {
+		return pending{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(c.Value)
+	if err != nil {
 		return pending{}, false
 	}
 	var pd pending
-	if err := json.Unmarshal([]byte(raw), &pd); err != nil {
+	if err := json.Unmarshal(raw, &pd); err != nil {
 		return pending{}, false
 	}
 	return pd, true
+}
+
+// pendingCookie is the provider name's pending cookie holding value, for
+// maxAge seconds; a negative maxAge deletes it.
+func (p *Plugin) pendingCookie(r *http.Request, name, value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     pendingCookieName,
+		Value:    value,
+		Path:     p.pendingPath(name),
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   collage.IsHTTPS(r),
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
+// clearPending deletes the provider name's pending cookie.
+func (p *Plugin) clearPending(w http.ResponseWriter, r *http.Request, name string) {
+	http.SetCookie(w, p.pendingCookie(r, name, "", -1))
 }
 
 // challenge is the S256 code_challenge of a PKCE verifier.
@@ -87,11 +129,10 @@ func (p *Plugin) fail(w http.ResponseWriter, r *http.Request, code string, statu
 	p.host.ServeStatus(w, r, status)
 }
 
-// login sends the reader to the provider, with a pending sign-in kept in the
-// session for the callback to check.
+// login sends the reader to the provider, with a pending sign-in kept in a
+// cookie for the callback to check. It starts no session.
 func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *provider) {
-	sess := session.FromContext(r.Context())
-	if sess == nil {
+	if session.FromContext(r.Context()) == nil {
 		p.host.Logger().Error("elagoht/oauth needs elagoht/session in Config.Plugins")
 		p.host.ServeStatus(w, r, http.StatusInternalServerError)
 		return
@@ -115,8 +156,8 @@ func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *
 		return
 	}
 
-	// The pending sign-in lives in the session cookie, so a long next (anyone can
-	// send a reader to a login link) must not grow it.
+	// The pending sign-in lives in a cookie, so a long next (anyone can send a
+	// reader to a login link) must not grow it.
 	next := r.URL.Query().Get("next")
 	if len(next) > maxNext {
 		next = ""
@@ -132,12 +173,13 @@ func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *
 			return
 		}
 	}
-	err = p.keepPending(sess, name, pd)
+	value, err := p.pendingValue(pd)
 	if err != nil {
-		p.host.Logger().Error("elagoht/oauth: keeping the sign-in in the session failed", "error", err)
+		p.host.Logger().Error("elagoht/oauth: keeping the sign-in failed", "error", err)
 		p.host.ServeStatus(w, r, http.StatusInternalServerError)
 		return
 	}
+	http.SetCookie(w, p.pendingCookie(r, name, value, int(pendingTTL/time.Second)))
 
 	scopes := requestedScopes(pr)
 	q := endpoint.Query()
@@ -158,23 +200,24 @@ func (p *Plugin) login(w http.ResponseWriter, r *http.Request, name string, pr *
 	seeOther(w, endpoint.String())
 }
 
-// keepPending stores pd in the session. When the session cannot hold it, the
-// sign-in is kept without its next, ending at AfterLogin: a next under maxNext
-// can still be too much for a session that holds data of its own.
-func (p *Plugin) keepPending(sess *session.Session, name string, pd pending) error {
+// pendingValue is pd as the pending cookie's value. When the cookie would be
+// more than a browser keeps, the sign-in is kept without its next, ending at
+// AfterLogin: a next under maxNext whose characters JSON escapes can still be
+// too much.
+func (p *Plugin) pendingValue(pd pending) (string, error) {
 	raw, err := encodePending(pd)
 	if err != nil {
-		return err
+		return "", err
 	}
-	err = sess.Set(pendingKey(name), raw)
-	if !errors.Is(err, session.ErrTooLarge) || pd.Next == p.opts.AfterLogin {
-		return err
+	value := base64.RawURLEncoding.EncodeToString([]byte(raw))
+	if len(pendingCookieName)+len(value) <= maxPendingCookie || pd.Next == p.opts.AfterLogin {
+		return value, nil
 	}
 	pd.Next = p.opts.AfterLogin
 	if raw, err = encodePending(pd); err != nil {
-		return err
+		return "", err
 	}
-	return sess.Set(pendingKey(name), raw)
+	return base64.RawURLEncoding.EncodeToString([]byte(raw)), nil
 }
 
 // requestedScopes is what login asks the provider for, and what a token is

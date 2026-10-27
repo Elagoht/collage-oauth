@@ -195,10 +195,12 @@ func TestCallback_SignsIn(t *testing.T) {
 // Review Focus 1: a session ID planted before sign-in is not the signed-in one.
 func TestCallback_RegeneratesTheSession(t *testing.T) {
 	a := newCallbackApp(t, "", nil)
+	// The login starts no session; the reader had one already.
+	a.c.Get("/kv?k=x&v=1").WantStatus(http.StatusOK)
 	state := a.login(t, "c1")
 	before := a.sid(t)
 	if before == "" {
-		t.Fatal("the login started no session")
+		t.Fatal("no session before sign-in")
 	}
 	a.callback("c1", state).WantStatus(http.StatusSeeOther)
 	a.wantSignedIn(t)
@@ -216,7 +218,7 @@ func TestCallback_SecondLoginReplacesTheFirst(t *testing.T) {
 	})
 }
 
-// Review Focus 3: no session cookie at all.
+// Review Focus 3: no pending sign-in cookie at all.
 func TestCallback_NoPendingSignIn(t *testing.T) {
 	wantFailure(t, "state", nil, func(t *testing.T, a *callbackApp) *collagetest.Response {
 		return a.callback("c1", "anything")

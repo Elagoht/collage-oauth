@@ -48,7 +48,7 @@ func (p *Plugin) callback(w http.ResponseWriter, r *http.Request, name string, p
 
 	// Used once: gone before anything is checked, whatever the outcome.
 	pd, ok := p.pendingFor(r, name)
-	sess.Delete(pendingKey(name))
+	p.clearPending(w, r, name)
 	if !ok {
 		p.fail(w, r, "state", http.StatusBadRequest)
 		return
@@ -135,8 +135,8 @@ func (p *Plugin) callback(w http.ResponseWriter, r *http.Request, name string, p
 		p.host.ServeStatus(w, r, http.StatusInternalServerError)
 		return
 	}
-	// The session cookie is signed, so next is what login stored; checked again
-	// all the same, since it is about to be a Location.
+	// The pending cookie is not signed, so next is checked again: it is about
+	// to be a Location.
 	seeOther(w, collage.SafeRedirect(pd.Next, p.opts.AfterLogin))
 }
 
